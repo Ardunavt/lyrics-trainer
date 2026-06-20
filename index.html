@@ -299,8 +299,18 @@ function counts(song){
   return c;
 }
 function markKnown(it){
-  it.status = "know";
+  it.status = "know"; it.unsureStreak = 0;
   if(it.kind==="word") state.known[norm(it.text)] = true;
+}
+function demoteItem(it){
+  if(it.status==="know"){
+    it.status="unsure"; it.unsureStreak=0;
+    if(it.kind==="word") delete state.known[norm(it.text)];
+  } else if(it.status==="unsure"){
+    it.status="dont"; it.unsureStreak=0;
+  } else {
+    it.status="dont"; it.unsureStreak=0;
+  }
 }
 function rebuildKnown(){
   state.known = {};
@@ -404,6 +414,16 @@ function rLibrary(){
     "<button class='btn small ghost' onclick=\"go('stats')\">Статистика</button></div>";
   if(!storageOk) html += "<div class='notice'>Сховище недоступне — дані живуть лише до закриття сторінки.</div>";
   html += "<button class='btn primary block' onclick=\"go('import')\">+ Додати пісню</button>";
+  if(state.songs.length){
+    const allLearn = state.songs.reduce((n,s)=>n+counts(s).dont+counts(s).unsure,0);
+    const allPool = state.songs.reduce((n,s)=>n+s.items.filter(i=>i.status!=="new").length,0);
+    if(allLearn>0 || allPool>0){
+      html += "<div class='row' style='margin-top:10px'>";
+      if(allLearn>0) html += "<button class='btn yellow' onclick='startGlobalStudy()'>Вчити все ("+allLearn+")</button>";
+      if(allPool>0) html += "<button class='btn' onclick='startGlobalTest()'>Тест по всіх ("+allPool+")</button>";
+      html += "</div>";
+    }
+  }
   if(!state.songs.length){
     html += "<div class='card center' style='margin-top:14px'>"+
       "<p class='sub'>Поки що порожньо. Додай першу пісню або спробуй демо.</p>"+
@@ -521,23 +541,63 @@ function startStudy(mode){
   let queue;
   if(mode==="sort") queue = s.items.filter(i=>i.status==="new");
   else queue = shuffle(s.items.filter(i=>i.status==="dont"||i.status==="unsure"));
-  session = {mode, queue, done:0, total:queue.length, flipped:false};
+  session = {mode, queue, done:0, total:queue.length, flipped:false, global:false};
   go("study");
 }
+function startGlobalStudy(){
+  const queue = shuffle(
+    state.songs.flatMap(s=>s.items.filter(i=>i.status==="dont"||i.status==="unsure"))
+  );
+  if(!queue.length) return;
+  session = {mode:"learn", queue, done:0, total:queue.length, flipped:false, global:true};
+  view.songId = null;
+  go("study");
+}
+function startGlobalTest(){
+  const pool = state.songs.flatMap(s=>s.items.filter(i=>i.status!=="new"));
+  if(!pool.length) return;
+  const allT = state.songs.flatMap(x=>x.items.map(i=>i.t));
+  const qs = shuffle(pool).map(it=>{
+    const wrong = shuffle(allT.filter(t=>t!==it.t)).slice(0,3);
+    return {it, options:shuffle([it.t, ...wrong])};
+  });
+  session = {qs, idx:0, score:0, answered:null, global:true};
+  go("test");
+}
+function flip(){ session.flipped = true; rStudy(); }
+function endStudy(){
+  const wasGlobal = session && session.global;
+  session = null; save();
+  wasGlobal ? go("library") : go("song");
+}
 function rStudy(){
-  const s = songById(view.songId);
+  const isGlobal = session && session.global;
+  const s = isGlobal ? null : songById(view.songId);
   if(!session || !session.queue.length){
-    const c = counts(s);
+    let summary;
+    if(isGlobal){
+      const tk=state.songs.reduce((n,sg)=>n+counts(sg).know,0);
+      const tu=state.songs.reduce((n,sg)=>n+counts(sg).unsure,0);
+      const td=state.songs.reduce((n,sg)=>n+counts(sg).dont,0);
+      summary="Знаю: "+tk+" · Сумніваюся: "+tu+" · Не знаю: "+td;
+    } else {
+      const c=counts(s); summary="Знаю: "+c.know+" · Сумніваюся: "+c.unsure+" · Не знаю: "+c.dont;
+    }
+    const backBtn = isGlobal
+      ? "<button class='btn primary block' onclick=\"go('library')\">До бібліотеки</button>"
+      : "<button class='btn primary block' onclick=\"go('song')\">До пісні</button>";
     app.innerHTML = "<div class='card center study'><div>"+
       "<div class='bignum'>✓</div><h2>"+(session&&session.mode==="sort"?"Відсортовано!":"Прогін завершено!")+"</h2>"+
-      "<p class='sub'>Знаю: "+c.know+" · Сумніваюся: "+c.unsure+" · Не знаю: "+c.dont+"</p>"+
+      "<p class='sub'>"+summary+"</p>"+
       (session&&session.mode==="learn"?"<p class='sub'>Одне повторення — один крок. Повернися пізніше і прожени ще раз.</p>":"")+"</div>"+
-      "<button class='btn primary block' onclick=\"go('song')\">До пісні</button></div>";
+      backBtn+"</div>";
     session = null; save(); return;
   }
   const it = session.queue[0];
+  const streakHint = (it.status==="unsure" && session.mode!=="sort")
+    ? " · повторень: "+((it.unsureStreak||0)+1)+"/2" : "";
   const head = "<div class='progressline' style='display:flex;justify-content:space-between;align-items:center'>"+
-    "<span>"+(session.mode==="sort"?"Сортування":"Повторення")+" · залишилось "+session.queue.length+"</span>"+
+    "<span>"+(session.mode==="sort"?"Сортування":"Повторення")+" · залишилось "+session.queue.length+streakHint+"</span>"+
     "<button class='btn small ghost' onclick=\"endStudy()\">На сьогодні досить</button></div>";
   if(session.mode==="sort"){
     app.innerHTML = "<div class='card study'>"+head+
@@ -559,21 +619,26 @@ function rStudy(){
     app.innerHTML = "<div class='card study'>"+head+body+controls+"</div>";
   }
 }
-function flip(){ session.flipped = true; rStudy(); }
-function endStudy(){ session = null; save(); go("song"); }
 function answerSort(st){
   const it = session.queue.shift();
-  if(st==="know") markKnown(it); else it.status = st;
+  if(st==="know") markKnown(it);
+  else { it.status = st; it.unsureStreak = 0; }
   save(); rStudy();
 }
 function answerLearn(remembered){
   const it = session.queue.shift();
   session.flipped = false;
   if(remembered){
-    if(it.status==="dont") it.status="unsure";
-    else markKnown(it);
+    if(it.status==="dont"){
+      it.status="unsure"; it.unsureStreak=0;
+    } else if(it.status==="unsure"){
+      it.unsureStreak = (it.unsureStreak||0) + 1;
+      if(it.unsureStreak >= 2) markKnown(it);
+    } else {
+      markKnown(it);
+    }
   } else {
-    it.status = "dont";
+    demoteItem(it);
   }
   save(); rStudy();
 }
@@ -593,12 +658,16 @@ function startTest(){
 function rTest(){
   if(session.idx >= session.qs.length){
     const ok = session.score===session.qs.length;
+    const isGlobal = session.global;
+    const backBtn = isGlobal
+      ? "<button class='btn primary block' onclick=\"go('library')\">До бібліотеки</button>"
+      : "<button class='btn primary block' onclick=\"go('song')\">До пісні</button>";
     app.innerHTML = "<div class='card center study'><div>"+
       "<div class='bignum'>"+session.score+"/"+session.qs.length+"</div>"+
       "<h2>"+(ok?"Ідеально! 🎧":"Непогано!")+"</h2>"+
-      "<p class='sub'>"+(ok?"Вмикай пісню — тепер ти зрозумієш кожен рядок.":"Слова з помилками варто ще раз прогнати у «Вчити».")+"</p></div>"+
-      "<button class='btn primary block' onclick=\"go('song')\">До пісні</button></div>";
-    return;
+      "<p class='sub'>"+(ok?"Вмикай пісню — тепер ти зрозумієш кожен рядок.":"Слова з помилками відкочено на крок назад, прожени «Вчити» ще раз.")+"</p></div>"+
+      backBtn+"</div>";
+    session = null; return;
   }
   const q = session.qs[session.idx];
   let html = "<div class='card study'><div>"+
@@ -624,7 +693,7 @@ function answerTest(i){
   session.answered = i;
   const q = session.qs[session.idx];
   if(q.options[i]===q.it.t) session.score++;
-  else { q.it.status="unsure"; if(q.it.kind==="word") delete state.known[norm(q.it.text)]; save(); }
+  else { demoteItem(q.it); save(); }
   rTest();
 }
 function nextTest(){ session.idx++; session.answered=null; rTest(); }
