@@ -340,11 +340,29 @@ const kindTag = it => it.kind==="phrase" ? "<span class='tag'>фраза</span>"
 
 /* ---------- import ---------- */
 const PROMPT_TEXT =
-`Ось текст пісні. Зроби з нього дані для мого тренажера слів:
-1. Випиши всі унікальні значущі слова (без артиклів, прийменників, займенників і дублікатів), кожне з перекладом українською та рядком пісні, де воно зустрічається.
-2. Окремо випиши словосполучення/ідіоми/фразові дієслова, зміст яких не дорівнює дослівному перекладу, з поясненням.
-3. Віддай результат СУВОРО одним JSON-блоком без жодного іншого тексту, у форматі:
-{"title":"Назва","artist":"Виконавець","words":[{"w":"слово","t":"переклад","c":"рядок з пісні"}],"phrases":[{"p":"фраза","t":"переклад/пояснення","c":"рядок з пісні"}]}
+`Ось текст пісні. Зроби з нього структуровані дані для тренажера вивчення слів. Виконай суворо за інструкцією:
+
+1. Список слів (words):
+- Випиши всі унікальні значущі слова: іменники, дієслова, прикметники, прислівники, сленг
+- Пропускай: артиклі (a, an, the), прийменники (in, on, at...), займенники (I, you, he...), числівники, вигуки (oh, ah...), повтори того самого слова
+- Слово давай у базовій формі: інфінітив для дієслів (running→run), однина для іменників (roses→rose)
+- Для кожного слова:
+  "w" — базова форма слова
+  "t" — переклад українською; якщо кілька значень — через крапку з комою
+  "c" — точний рядок з тексту, де слово зустрічається вперше (дослівно, не вигадуй)
+  "tr" — транскрипція IPA тільки для слів із неочевидною вимовою (through, choir, colonel, subtle, gauge, island, queue, ache, knight тощо). Для простих слів (run, love, feel) поле "tr" не додавай взагалі.
+
+2. Список фраз (phrases):
+- Фразові дієслова, ідіоми, сленг і сталі вирази, значення яких не збігається з дослівним перекладом
+- Для кожної фрази:
+  "p" — фраза як у тексті
+  "t" — переклад або пояснення українською (якщо є цікавий контекст — коротко в дужках)
+  "c" — точний рядок з тексту
+
+3. Формат: віддай результат СУВОРО одним JSON-блоком, без жодного пояснення або тексту до чи після. Перший символ — {, останній — }.
+
+Формат JSON:
+{"title":"Назва","artist":"Виконавець","words":[{"w":"слово","t":"переклад","c":"рядок"},{"w":"слово","t":"переклад","c":"рядок","tr":"trænˈskrɪpʃən"}],"phrases":[{"p":"фраза","t":"пояснення","c":"рядок"}]}
 
 Текст пісні:
 `;
@@ -359,7 +377,7 @@ function importSong(jsonText){
   let autoKnown = 0;
   for(const w of (data.words||[])){
     if(!w.w || !w.t) continue;
-    const it = {id:uid(), kind:"word", text:w.w, t:w.t, c:w.c||"", status:"new"};
+    const it = {id:uid(), kind:"word", text:w.w, t:w.t, c:w.c||"", tr:w.tr||"", status:"new"};
     if(state.known[norm(w.w)]){ it.status="know"; autoKnown++; }
     items.push(it);
   }
@@ -602,13 +620,15 @@ function rStudy(){
   if(session.mode==="sort"){
     app.innerHTML = "<div class='card study'>"+head+
       "<div>"+kindTag(it)+"<div class='word'>"+esc(it.text)+"</div>"+
+      (it.tr?"<div style='color:var(--muted);font-size:15px;margin-bottom:4px'>["+esc(it.tr)+"]</div>":"")+
       "<div class='trans'>"+esc(it.t)+"</div>"+highlightCtx(it)+"</div>"+
       "<div class='row'>"+
       "<button class='btn green' onclick=\"answerSort('know')\">Знаю</button>"+
       "<button class='btn yellow' onclick=\"answerSort('unsure')\">Сумніваюся</button>"+
       "<button class='btn red' onclick=\"answerSort('dont')\">Не знаю</button></div></div>";
   } else {
-    let body = "<div>"+kindTag(it)+"<div class='word'>"+esc(it.text)+"</div>";
+    let body = "<div>"+kindTag(it)+"<div class='word'>"+esc(it.text)+"</div>"+
+      (it.tr?"<div style='color:var(--muted);font-size:15px;margin-bottom:4px'>["+esc(it.tr)+"]</div>":"");
     if(session.flipped) body += "<div class='trans'>"+esc(it.t)+"</div>"+highlightCtx(it);
     else body += highlightCtx(it);
     body += "</div>";
@@ -672,7 +692,9 @@ function rTest(){
   const q = session.qs[session.idx];
   let html = "<div class='card study'><div>"+
     "<div class='progressline'>Тест · "+(session.idx+1)+" з "+session.qs.length+"</div>"+
-    kindTag(q.it)+"<div class='word'>"+esc(q.it.text)+"</div>"+highlightCtx(q.it)+"<div style='margin-top:14px'>";
+    kindTag(q.it)+"<div class='word'>"+esc(q.it.text)+"</div>"+
+    (q.it.tr?"<div style='color:var(--muted);font-size:15px;margin-bottom:4px'>["+esc(q.it.tr)+"]</div>":"")+
+    highlightCtx(q.it)+"<div style='margin-top:14px'>";
   q.options.forEach((opt,i)=>{
     let cls = "btn opt";
     if(session.answered!==null){
