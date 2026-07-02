@@ -690,8 +690,13 @@ function rTest(){
     session = null; return;
   }
   const q = session.qs[session.idx];
+  const answered = session.answeredCount||0;
+  const wrongSoFar = answered - session.score;
   let html = "<div class='card study'><div>"+
-    "<div class='progressline'>Тест · "+(session.idx+1)+" з "+session.qs.length+"</div>"+
+    "<div class='progressline' style='display:flex;justify-content:space-between;align-items:center'>"+
+    "<span>Тест · "+(session.idx+1)+" з "+session.qs.length+
+    (answered>0?" · <span style='color:var(--green)'>✓"+session.score+"</span>"+(wrongSoFar>0?" <span style='color:var(--red)'>✗"+wrongSoFar+"</span>":""):"")+"</span>"+
+    "<button class='btn small ghost' onclick='exitTest()'>На сьогодні досить</button></div>"+
     kindTag(q.it)+"<div class='word'>"+esc(q.it.text)+"</div>"+
     (q.it.tr?"<div style='color:var(--muted);font-size:15px;margin-bottom:4px'>["+esc(q.it.tr)+"]</div>":"")+
     highlightCtx(q.it)+"<div style='margin-top:14px'>";
@@ -713,12 +718,34 @@ function rTest(){
 function answerTest(i){
   if(session.answered!==null) return;
   session.answered = i;
+  session.answeredCount = (session.answeredCount||0) + 1;
   const q = session.qs[session.idx];
   if(q.options[i]===q.it.t) session.score++;
   else { demoteItem(q.it); save(); }
   rTest();
 }
 function nextTest(){ session.idx++; session.answered=null; rTest(); }
+function exitTest(){
+  const answered = session.answeredCount||0;
+  const correct = session.score;
+  const wrong = answered - correct;
+  const skipped = session.qs.length - answered;
+  const isGlobal = session.global;
+  const backBtn = isGlobal
+    ? "<button class='btn primary block' onclick=\"go('library')\">До бібліотеки</button>"
+    : "<button class='btn primary block' onclick=\"go('song')\">До пісні</button>";
+  app.innerHTML = "<div class='card center study'><div>"+
+    "<div class='bignum'>"+correct+"/"+answered+"</div>"+
+    "<h2>Тест зупинено</h2>"+
+    "<div class='card' style='text-align:left;margin:12px 0'>"+
+    "<div class='list-item'><div class='li-main'>Правильно</div><b style='color:var(--green)'>"+correct+"</b></div>"+
+    "<div class='list-item'><div class='li-main'>Помилок (відкочено назад)</div><b style='color:var(--red)'>"+wrong+"</b></div>"+
+    "<div class='list-item'><div class='li-main'>Не дійшло черги</div><b style='color:var(--muted)'>"+skipped+"</b></div>"+
+    "</div>"+
+    (wrong>0?"<p class='sub'>Слова з помилками вже відкочено — прожени «Вчити» щоб надолужити.</p>":"")+
+    "</div>"+backBtn+"</div>";
+  session = null; save();
+}
 
 /* ---------- stats ---------- */
 function rStats(){
