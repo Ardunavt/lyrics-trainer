@@ -68,6 +68,10 @@
   .li-main{flex:1; min-width:0;}
   .li-w{font-weight:700;}
   .li-t{color:var(--muted); font-size:13px;}
+  .del-x{background:transparent; border:1px solid var(--line); color:var(--muted);
+    border-radius:8px; padding:4px 10px; font:inherit; font-size:12px; font-weight:700;
+    cursor:pointer; flex-shrink:0; white-space:nowrap;}
+  .del-x.armed{border-color:var(--red); color:var(--red);}
   .tabs{display:flex; gap:8px; margin:14px 0;}
   .tab{flex:1; text-align:center; padding:9px; border-radius:10px; background:var(--surface);
     border:1px solid var(--line); font-weight:700; font-size:14px; cursor:pointer; color:var(--muted);}
@@ -531,13 +535,28 @@ function rSong(){
     const d = it.status==="know"?"g":it.status==="unsure"?"y":it.status==="dont"?"r":"n";
     html += "<div class='list-item'><span class='dot "+d+"'></span>"+
       "<div class='li-main'><div class='li-w'>"+esc(it.text)+"</div>"+
-      "<div class='li-t'>"+esc(it.t)+"</div></div></div>";
+      "<div class='li-t'>"+esc(it.t)+"</div></div>"+
+      "<button class='del-x' onclick=\"delItem('"+it.id+"',this)\">✕</button></div>";
   }
   html += "</div>";
   html += "<div class='row' style='margin-top:4px'>"+
     "<button class='btn small' style='background:transparent;border-color:var(--red);color:var(--red)' onclick='resetSong(this)'>Скинути прогрес</button>"+
     "<button class='btn small' style='background:transparent;border-color:var(--red);color:var(--red)' onclick='delSong(this)'>Видалити пісню</button></div>";
   app.innerHTML = html;
+}
+function delItem(id, btn){
+  if(!btn.dataset.armed){
+    btn.dataset.armed = "1";
+    btn.classList.add("armed");
+    btn.textContent = "точно?";
+    setTimeout(()=>{ if(btn.isConnected && btn.dataset.armed){
+      delete btn.dataset.armed; btn.classList.remove("armed"); btn.textContent = "✕"; } }, 3000);
+    return;
+  }
+  const s = songById(view.songId);
+  if(!s) return;
+  s.items = s.items.filter(i=>i.id!==id);
+  rebuildKnown(); save(); rSong();
 }
 function delSong(btn){
   armConfirm(btn, ()=>{
