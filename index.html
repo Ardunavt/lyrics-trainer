@@ -286,9 +286,16 @@ function setSyncMsg(m){
   if(el) el.textContent = m;
 }
 function adoptRemote(remote){
+  const localDecks = state.decks || [];
   const localDaily = state.daily || {};
-  state = { songs: remote.songs||[], decks: remote.decks||[], known: remote.known||{},
+  state = { songs: remote.songs||[], decks: remote.decks, known: remote.known||{},
     daily: remote.daily||{}, updated: remote.updated };
+  /* захист: якщо запис у репозиторії зробила стара версія сайту (взагалі без поля decks),
+     не даємо їй стерти локальний словник — повертаємо свій і одразу пушимо назад */
+  if(!Array.isArray(state.decks)){
+    state.decks = localDecks;
+    if(localDecks.length){ state.updated = Date.now(); schedulePush(); }
+  }
   for(const k in localDaily) state.daily[k] = Math.max(state.daily[k]||0, localDaily[k]);
   normState(); rebuildKnown();
 }
@@ -363,6 +370,18 @@ function schedulePush(){
   clearTimeout(pushT);
   pushT = setTimeout(()=>pushRemote(true), 30000);
 }
+/* негайний пуш — після імпорту порції і в кінці тренування, щоб нічого не губилось */
+function syncPushNow(){
+  if(!syncOn()) return;
+  clearTimeout(pushT);
+  pushRemote(true);
+}
+/* згорнув вкладку чи заблокував телефон — пушимо одразу; повернувся — підтягуємо свіже */
+document.addEventListener("visibilitychange", ()=>{
+  if(!syncOn()) return;
+  if(document.hidden){ clearTimeout(pushT); pushRemote(true); }
+  else pullRemote(true);
+});
 function timeStr(){ const d=new Date(); return d.getHours()+":"+String(d.getMinutes()).padStart(2,"0"); }
 setInterval(()=>{ if(syncOn() && !document.hidden) pullRemote(true); }, 5*60*1000);
 const uid = () => Math.random().toString(36).slice(2,10);
@@ -637,7 +656,7 @@ function rLibrary(){
       }
     }
   }
-  html += "</div><div class='footer-note'>Пісні і словник — окремі блоки, але слово, вивчене в одному, зараховується і в іншому.</div>";
+  html += "</div><div class='footer-note'>Пісні і словник — окремі блоки, але слово, вивчене в одному, зараховується і в іншому. · v1.3</div>";
   app.innerHTML = html;
 }
 function colCard(s, title, sub){
@@ -716,6 +735,7 @@ function copyPrompt(btn){
 function doImport(){
   const r = importSong(document.getElementById("jsonin").value);
   if(r.err){ document.getElementById("imp-err").textContent = r.err; return; }
+  syncPushNow();
   let msg = "";
   if(r.autoKnown) msg = r.autoKnown+" слів уже у твоєму словнику — позначені як «знаю» автоматично.";
   go("song",{songId:r.song.id, tab:"word", flash:msg});
@@ -779,6 +799,7 @@ function doDictImport(){
   const {lang, level} = dictSel();
   const r = importDeck(lang, level, document.getElementById("dict-json").value);
   if(r.err){ document.getElementById("dict-err").textContent = r.err; return; }
+  syncPushNow();
   let msg = "Додано нових карток: "+r.added;
   if(r.dup) msg += " · пропущено дублікатів: "+r.dup;
   if(r.autoKnown) msg += " · уже вивчених (позначені «знаю»): "+r.autoKnown;
@@ -899,7 +920,7 @@ function startGlobalTest(scope){
 function flip(){ session.flipped = true; rStudy(); }
 function endStudy(){
   const wasGlobal = session && session.global;
-  session = null; save();
+  session = null; save(); syncPushNow();
   wasGlobal ? go("library") : go("song");
 }
 function rStudy(){
@@ -924,7 +945,7 @@ function rStudy(){
       "<p class='sub'>"+summary+"</p>"+
       (session&&session.mode==="learn"?"<p class='sub'>Одне повторення — один крок. Повернися пізніше і прожени ще раз.</p>":"")+"</div>"+
       backBtn+"</div>";
-    session = null; save(); return;
+    session = null; save(); syncPushNow(); return;
   }
   const it = session.queue[0];
   const spk = "<button class='spk' onclick='speakCur()'>🔊</button>";
@@ -1014,7 +1035,7 @@ function rTest(){
       "<h2>"+(ok?"Ідеально! 🎧":"Непогано!")+"</h2>"+
       "<p class='sub'>"+(ok?"Все відповіли правильно — так тримати!":"Слова з помилками відкочено на крок назад, прожени «Вчити» ще раз.")+"</p></div>"+
       backBtn+"</div>";
-    session = null; return;
+    session = null; syncPushNow(); return;
   }
   const q = session.qs[session.idx];
   const answered = session.answeredCount||0;
@@ -1072,7 +1093,7 @@ function exitTest(){
     "</div>"+
     (wrong>0?"<p class='sub'>Слова з помилками вже відкочено — прожени «Вчити» щоб надолужити.</p>":"")+
     "</div>"+backBtn+"</div>";
-  session = null; save();
+  session = null; save(); syncPushNow();
 }
 
 /* ---------- гарячі клавіші (для комп'ютера) ---------- */
