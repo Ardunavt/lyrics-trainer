@@ -48,6 +48,8 @@
   textarea{width:100%; min-height:170px; background:var(--surface); color:var(--text);
     border:1px solid var(--line); border-radius:var(--r); padding:12px; font-family:monospace; font-size:13px; resize:vertical;}
   textarea:focus, input:focus{outline:2px solid var(--accent); outline-offset:-1px;}
+  .field{width:100%; margin-bottom:8px; background:var(--surface2); color:var(--text);
+    border:1px solid var(--line); border-radius:10px; padding:10px; font:inherit;}
   pre{background:var(--surface); border:1px solid var(--line); border-radius:var(--r);
     padding:12px; font-size:12px; overflow-x:auto; color:var(--muted); white-space:pre-wrap;}
   .study{min-height:330px; display:flex; flex-direction:column; justify-content:space-between;}
@@ -57,7 +59,7 @@
   .ctx b{color:var(--text); font-style:normal;}
   .tag{display:inline-block; font-size:11px; font-weight:800; letter-spacing:.5px;
     text-transform:uppercase; color:var(--muted); border:1px solid var(--line);
-    border-radius:6px; padding:2px 7px; margin-bottom:6px;}
+    border-radius:6px; padding:2px 7px; margin-bottom:6px; margin-right:5px;}
   .progressline{font-size:13px; color:var(--muted); margin-bottom:10px;}
   .list-item{display:flex; justify-content:space-between; align-items:center; gap:10px;
     padding:10px 0; border-bottom:1px solid var(--line);}
@@ -72,6 +74,7 @@
     border-radius:8px; padding:4px 10px; font:inherit; font-size:12px; font-weight:700;
     cursor:pointer; flex-shrink:0; white-space:nowrap;}
   .del-x.armed{border-color:var(--red); color:var(--red);}
+  .spk{background:transparent; border:none; font-size:19px; cursor:pointer; padding:0 4px; vertical-align:middle;}
   .tabs{display:flex; gap:8px; margin:14px 0;}
   .tab{flex:1; text-align:center; padding:9px; border-radius:10px; background:var(--surface);
     border:1px solid var(--line); font-weight:700; font-size:14px; cursor:pointer; color:var(--muted);}
@@ -95,12 +98,35 @@
 "use strict";
 
 /* ---------- state & storage ---------- */
-let state = { songs: [], known: {} };
-let view = { screen: "library", songId: null, tab: "word" };
+let state = { songs: [], decks: [], known: {}, daily: {} };
+let view = { screen: "library", home: "songs", songId: null, tab: "word" };
 let session = null;
 let storageOk = false;
 let backend = "none"; // "claude" | "local" | "none"
 const KEY = "lyrics-trainer-data";
+
+/* мова → код озвучки (Web Speech API) */
+const LANG_CODES = {
+  "англійська":"en-US","німецька":"de-DE","французька":"fr-FR","іспанська":"es-ES",
+  "італійська":"it-IT","польська":"pl-PL","португальська":"pt-PT","чеська":"cs-CZ",
+  "нідерландська":"nl-NL","шведська":"sv-SE","турецька":"tr-TR","японська":"ja-JP",
+  "корейська":"ko-KR","китайська":"zh-CN","грецька":"el-GR","румунська":"ro-RO"
+};
+const deckLangCode = lang => LANG_CODES[norm(lang)] || "en-US";
+
+function normState(){
+  if(!Array.isArray(state.songs)) state.songs = [];
+  if(!Array.isArray(state.decks)) state.decks = [];
+  if(!state.known || typeof state.known !== "object") state.known = {};
+  if(!state.daily || typeof state.daily !== "object") state.daily = {};
+  for(const d of state.decks){
+    const c = deckLangCode(d.lang);
+    for(const it of d.items) if(!it.lc) it.lc = c;
+  }
+}
+const allCols = () => state.songs.concat(state.decks);
+/* пісні і словник — окремі навчальні блоки; scope вибирає один з них */
+const scopeCols = sc => sc==="dict" ? state.decks : state.songs;
 
 async function load(){
   try{
@@ -110,6 +136,7 @@ async function load(){
         const res = await window.storage.get(KEY);
         if(res && res.value) state = JSON.parse(res.value);
       }catch(e){ /* ключа ще нема — норм */ }
+      normState();
       return;
     }
   }catch(e){}
@@ -118,6 +145,7 @@ async function load(){
     backend = "local"; storageOk = true;
     if(raw) state = JSON.parse(raw);
   }catch(e){ backend = "none"; storageOk = false; }
+  normState();
 }
 let saveT = null, saving = false, dirty = false, failNote = false;
 function save(){
@@ -173,6 +201,52 @@ function showSaveNote(text, autohide){
   if(autohide) setTimeout(()=>{ el.style.display = "none"; }, 2500);
 }
 
+/* ---------- озвучка ---------- */
+function speak(text, code){
+  try{
+    if(!window.speechSynthesis) return;
+    speechSynthesis.cancel();
+    const u = new SpeechSynthesisUtterance(text);
+    u.lang = code || "en-US";
+    u.rate = 0.9;
+    speechSynthesis.speak(u);
+  }catch(e){}
+}
+function speakCur(){
+  if(!session || !session.queue || !session.queue.length) return;
+  const it = session.queue[0];
+  speak(it.text, it.lc);
+}
+function speakTest(){
+  if(!session || !session.qs) return;
+  const q = session.qs[session.idx];
+  if(q) speak(q.it.text, q.it.lc);
+}
+function speakItem(id){
+  const s = songById(view.songId);
+  if(!s) return;
+  const it = s.items.find(i=>i.id===id);
+  if(it) speak(it.text, it.lc);
+}
+
+/* ---------- щоденна серія ---------- */
+function dayKey(d){
+  d = d || new Date();
+  return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")+"-"+String(d.getDate()).padStart(2,"0");
+}
+function bumpDaily(){
+  if(!state.daily) state.daily = {};
+  const k = dayKey();
+  state.daily[k] = (state.daily[k]||0)+1;
+}
+function streakDays(){
+  let n = 0;
+  const d = new Date();
+  if(!state.daily[dayKey(d)]) d.setDate(d.getDate()-1); // сьогодні ще не займався — рахуємо від учора
+  while(state.daily[dayKey(d)]){ n++; d.setDate(d.getDate()-1); }
+  return n;
+}
+
 /* ---------- github sync ---------- */
 const SKEY = "lyrics-trainer-sync";
 let sync = { owner:"", repo:"", token:"", branch:"main", path:"progress.json" };
@@ -211,6 +285,13 @@ function setSyncMsg(m){
   const el = document.getElementById("sync-status");
   if(el) el.textContent = m;
 }
+function adoptRemote(remote){
+  const localDaily = state.daily || {};
+  state = { songs: remote.songs||[], decks: remote.decks||[], known: remote.known||{},
+    daily: remote.daily||{}, updated: remote.updated };
+  for(const k in localDaily) state.daily[k] = Math.max(state.daily[k]||0, localDaily[k]);
+  normState(); rebuildKnown();
+}
 async function pullRemote(silent){
   if(!syncOn() || syncBusy) return;
   if(silent && session) return; // не смикаємо дані посеред тренування
@@ -220,7 +301,7 @@ async function pullRemote(silent){
     const res = await fetch(ghUrl(true), {headers: ghHeaders()});
     if(res.status===404){
       lastSha = null;
-      if(state.songs.length){ syncBusy=false; await pushRemote(true); return; }
+      if(state.songs.length || state.decks.length){ syncBusy=false; await pushRemote(true); return; }
       setSyncMsg("Підключено ✓ (у репозиторії ще немає даних)");
     } else if(res.status===401 || res.status===403){
       setSyncMsg("Помилка доступу — перевір токен і його права (Contents: Read and write)");
@@ -231,8 +312,7 @@ async function pullRemote(silent){
       lastSha = j.sha;
       const remote = JSON.parse(b64dec(j.content));
       if((remote.updated||0) > (state.updated||0)){
-        state = { songs: remote.songs||[], known: remote.known||{}, updated: remote.updated };
-        rebuildKnown();
+        adoptRemote(remote);
         if(backend!=="none") flush();
         render();
         setSyncMsg("Підтягнуто свіжіший прогрес з репозиторію ✓ "+timeStr());
@@ -258,8 +338,8 @@ async function pushRemote(silent){
       const remote = JSON.parse(b64dec(j.content));
       if((remote.updated||0) > (state.updated||0)){
         // на сервері новіше — забираємо його замість запису
-        state = { songs: remote.songs||[], known: remote.known||{}, updated: remote.updated };
-        rebuildKnown(); if(backend!=="none") flush(); render();
+        adoptRemote(remote);
+        if(backend!=="none") flush(); render();
         setSyncMsg("На сервері був новіший прогрес — підтягнув його ✓");
         syncBusy = false; return;
       }
@@ -288,7 +368,7 @@ setInterval(()=>{ if(syncOn() && !document.hidden) pullRemote(true); }, 5*60*100
 const uid = () => Math.random().toString(36).slice(2,10);
 const esc = s => String(s||"").replace(/[&<>"]/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 const shuffle = a => { a=a.slice(); for(let i=a.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1)); [a[i],a[j]]=[a[j],a[i]];} return a; };
-const songById = id => state.songs.find(s=>s.id===id);
+const songById = id => state.songs.find(s=>s.id===id) || state.decks.find(d=>d.id===id);
 const norm = w => String(w||"").toLowerCase().trim();
 
 function counts(song){
@@ -302,23 +382,23 @@ function counts(song){
   c.total = song.items.length;
   return c;
 }
-function markKnown(it){
-  it.status = "know"; it.unsureStreak = 0;
-  if(it.kind==="word") state.known[norm(it.text)] = true;
-}
-function demoteItem(it){
-  if(it.status==="know"){
-    it.status="unsure"; it.unsureStreak=0;
-    if(it.kind==="word") delete state.known[norm(it.text)];
-  } else if(it.status==="unsure"){
-    it.status="dont"; it.unsureStreak=0;
-  } else {
-    it.status="dont"; it.unsureStreak=0;
+/* повна синхронізація: те саме слово/фраза має один статус скрізь —
+   у всіх піснях і в усіх блоках словника */
+function setStatusAll(it, status){
+  const key = norm(it.text);
+  for(const col of allCols())
+    for(const x of col.items)
+      if(x.kind===it.kind && norm(x.text)===key){ x.status = status; x.unsureStreak = 0; }
+  if(it.kind==="word"){
+    if(status==="know") state.known[key] = true;
+    else delete state.known[key];
   }
 }
+function markKnown(it){ setStatusAll(it, "know"); }
+function demoteItem(it){ setStatusAll(it, it.status==="know" ? "unsure" : "dont"); }
 function rebuildKnown(){
   state.known = {};
-  for(const s of state.songs)
+  for(const s of allCols())
     for(const it of s.items)
       if(it.kind==="word" && it.status==="know") state.known[norm(it.text)] = true;
 }
@@ -342,7 +422,7 @@ function highlightCtx(it){
 }
 const kindTag = it => it.kind==="phrase" ? "<span class='tag'>фраза</span>" : "";
 
-/* ---------- import ---------- */
+/* ---------- import: пісні ---------- */
 const PROMPT_TEXT =
 `Ось текст пісні. Зроби з нього структуровані дані для тренажера вивчення слів. Виконай суворо за інструкцією:
 
@@ -396,6 +476,72 @@ function importSong(jsonText){
   return {song, autoKnown};
 }
 
+/* ---------- import: словник за рівнями ---------- */
+const LEVELS = ["A1","A2","B1","B2","C1","C2"];
+const findDeck = (lang, level) => state.decks.find(d=>norm(d.lang)===norm(lang) && d.level===level);
+
+function dictPromptText(lang, level, part){
+  const from = (part-1)*100+1, to = part*100;
+  const prev = part>1
+    ? "Ти вже давав слова з позицій 1–"+((part-1)*100)+" у попередніх порціях — НЕ повторюй їх.\n"
+    : "";
+  return "Сформуй порцію лексики для тренажера вивчення слів.\n\n"+
+"Мова, яку я вивчаю: "+lang+"\n"+
+"Рівень: "+level+"\n"+
+"Порція №"+part+": уяви список лексики рівня "+level+", впорядкований за частотністю вживання, і дай слова з позиції "+from+" по "+to+" (рівно 100 слів, якщо стільки лишилось у рівні).\n"+prev+
+"\n1. Список слів (words):\n"+
+"- Лише значущі слова рівня "+level+": іменники, дієслова, прикметники, прислівники\n"+
+"- Слово давай у базовій формі: інфінітив для дієслів, однина для іменників\n"+
+"- Для кожного слова:\n"+
+'  "w" — слово\n'+
+'  "t" — переклад українською; якщо кілька значень — через крапку з комою\n'+
+'  "c" — коротке просте речення-приклад із цим словом (складність не вище рівня '+level+")\n"+
+'  "tr" — транскрипція IPA тільки для слів із неочевидною вимовою; для простих слів поле не додавай\n'+
+"\n2. Список фраз (phrases): 5–15 сталих виразів, ідіом або фразових дієслів рівня "+level+":\n"+
+'  "p" — вираз\n'+
+'  "t" — переклад або пояснення українською\n'+
+'  "c" — коротке речення-приклад\n'+
+"\n3. Формат: віддай результат СУВОРО одним JSON-блоком, без жодного пояснення або тексту до чи після. Перший символ — {, останній — }.\n\n"+
+'{"lang":"'+lang+'","level":"'+level+'","words":[{"w":"...","t":"...","c":"..."},{"w":"...","t":"...","c":"...","tr":"..."}],"phrases":[{"p":"...","t":"...","c":"..."}]}';
+}
+
+function importDeck(lang, level, jsonText){
+  let data;
+  try{ data = JSON.parse(jsonText.trim()); }
+  catch(e){ return {err:"Не вдалося прочитати JSON. Перевір, що скопійовано весь блок від { до }."}; }
+  if(!Array.isArray(data.words) && !Array.isArray(data.phrases))
+    return {err:"У JSON немає списків words/phrases."};
+  let deck = findDeck(lang, level);
+  const fresh = !deck;
+  if(fresh) deck = {id:uid(), deck:true, lang, level, items:[], parts:0, added:Date.now()};
+  const lc = deckLangCode(lang);
+  const have = new Set(deck.items.map(i=>i.kind+"|"+norm(i.text)));
+  let added=0, dup=0, autoKnown=0;
+  for(const w of (data.words||[])){
+    if(!w.w || !w.t) continue;
+    const k = "word|"+norm(w.w);
+    if(have.has(k)){ dup++; continue; }
+    have.add(k);
+    const it = {id:uid(), kind:"word", text:w.w, t:w.t, c:w.c||"", tr:w.tr||"", status:"new", lc};
+    if(state.known[norm(w.w)]){ it.status="know"; autoKnown++; }
+    deck.items.push(it); added++;
+  }
+  for(const p of (data.phrases||[])){
+    if(!p.p || !p.t) continue;
+    const k = "phrase|"+norm(p.p);
+    if(have.has(k)){ dup++; continue; }
+    have.add(k);
+    deck.items.push({id:uid(), kind:"phrase", text:p.p, t:p.t, c:p.c||"", status:"new", lc});
+    added++;
+  }
+  if(!added && fresh) return {err:"Список слів порожній."};
+  if(!added) return {err:"Усі "+dup+" карток уже є в цьому блоці. Скопіюй промпт ще раз — він попросить наступну порцію (№"+((deck.parts||0)+1)+")."};
+  if(fresh) state.decks.push(deck);
+  deck.parts = (deck.parts||0)+1;
+  save();
+  return {deck, added, dup, autoKnown};
+}
+
 /* ---------- demo song (вигаданий текст, не реальна пісня) ---------- */
 const DEMO = {
   title:"Demo Song", artist:"для проби",
@@ -425,6 +571,7 @@ function render(){
   window.scrollTo(0,0);
   if(view.screen==="library") return rLibrary();
   if(view.screen==="import") return rImport();
+  if(view.screen==="dictimport") return rDictImport();
   if(view.screen==="song") return rSong();
   if(view.screen==="study") return rStudy();
   if(view.screen==="test") return rTest();
@@ -432,46 +579,115 @@ function render(){
 }
 
 function rLibrary(){
+  if(!view.home) view.home = "songs";
   let html = "<div class='topbar'><h1>Пісенний тренажер</h1>"+
     "<button class='btn small ghost' onclick=\"go('stats')\">Статистика</button></div>";
   if(!storageOk) html += "<div class='notice'>Сховище недоступне — дані живуть лише до закриття сторінки.</div>";
-  html += "<button class='btn primary block' onclick=\"go('import')\">+ Додати пісню</button>";
-  if(state.songs.length){
-    const allLearn = state.songs.reduce((n,s)=>n+counts(s).dont+counts(s).unsure,0);
-    const allPool = state.songs.reduce((n,s)=>n+s.items.filter(i=>i.status!=="new").length,0);
-    if(allLearn>0 || allPool>0){
-      html += "<div class='row' style='margin-top:10px'>";
-      if(allLearn>0) html += "<button class='btn yellow' onclick='startGlobalStudy()'>Вчити все ("+allLearn+")</button>";
-      if(allPool>0) html += "<button class='btn' onclick='startGlobalTest()'>Тест по всіх ("+allPool+")</button>";
-      html += "</div>";
+  const today = state.daily[dayKey()]||0;
+  const stk = streakDays();
+  if(today>0 || stk>0)
+    html += "<div class='sub' style='margin:-8px 0 10px'>🔥 Серія: "+stk+" дн. · сьогодні: "+today+" карток</div>";
+  html += "<input id='searchin' class='field' placeholder='🔎 Пошук слова у всіх списках…' oninput='doSearch()'>"+
+    "<div id='search-res'></div>";
+  html += "<div id='libmain'>";
+  html += "<div class='tabs' style='margin-top:6px'>"+
+    "<div class='tab "+(view.home==="songs"?"active":"")+"' onclick=\"go('library',{home:'songs'})\">🎵 Пісні</div>"+
+    "<div class='tab "+(view.home==="dict"?"active":"")+"' onclick=\"go('library',{home:'dict'})\">📚 Словник</div></div>";
+  /* кнопки «вчити/тест» діють лише в межах свого блока: пісні окремо, словник окремо */
+  const scope = scopeCols(view.home);
+  const scLearn = scope.reduce((n,s)=>n+counts(s).dont+counts(s).unsure,0);
+  const scPool = scope.reduce((n,s)=>n+s.items.filter(i=>i.status!=="new").length,0);
+  if(view.home==="songs") html += "<button class='btn primary block' onclick=\"go('import')\">+ Додати пісню</button>";
+  else html += "<button class='btn primary block' onclick=\"go('dictimport')\">+ Додати слова</button>";
+  if(scLearn>0 || scPool>0){
+    const nm = view.home==="dict" ? ["Вчити весь словник","Тест по словнику"] : ["Вчити всі пісні","Тест по піснях"];
+    html += "<div class='row' style='margin-top:10px'>";
+    if(scLearn>0) html += "<button class='btn yellow' onclick=\"startGlobalStudy('"+view.home+"')\">"+nm[0]+" ("+scLearn+")</button>";
+    if(scPool>0) html += "<button class='btn' onclick=\"startGlobalTest('"+view.home+"')\">"+nm[1]+" ("+scPool+")</button>";
+    html += "</div>";
+  }
+  if(view.home==="songs"){
+    if(!state.songs.length){
+      html += "<div class='card center' style='margin-top:14px'>"+
+        "<p class='sub'>Поки що порожньо. Додай першу пісню або спробуй демо.</p>"+
+        "<button class='btn block' onclick='loadDemo()'>Спробувати демо-пісню</button></div>";
+    }
+    html += "<div style='margin-top:14px'>";
+    for(const s of state.songs){
+      html += colCard(s, esc(s.title), s.artist?esc(s.artist):"");
+    }
+    html += "</div>";
+  } else {
+    if(!state.decks.length){
+      html += "<div class='card center' style='margin-top:14px'>"+
+        "<p class='sub'>Тут будуть великі блоки слів за рівнями мови (A1–C2). "+
+        "Натисни «+ Додати слова», обери мову й рівень — промпт для Claude збереться автоматично, "+
+        "а слова можна доливати порціями по 100.</p></div>";
+    }
+    const lvlOrder = {A1:0,A2:1,B1:2,B2:3,C1:4,C2:5};
+    const langs = [...new Set(state.decks.map(d=>d.lang))];
+    for(const lg of langs){
+      html += "<h2>"+esc(lg)+"</h2>";
+      const decks = state.decks.filter(d=>d.lang===lg)
+        .sort((a,b)=>(lvlOrder[a.level]??9)-(lvlOrder[b.level]??9));
+      for(const d of decks){
+        const w = d.items.filter(i=>i.kind==="word").length;
+        const p = d.items.filter(i=>i.kind==="phrase").length;
+        html += colCard(d, esc(d.level), w+" слів"+(p?" · "+p+" фраз":""));
+      }
     }
   }
-  if(!state.songs.length){
-    html += "<div class='card center' style='margin-top:14px'>"+
-      "<p class='sub'>Поки що порожньо. Додай першу пісню або спробуй демо.</p>"+
-      "<button class='btn block' onclick='loadDemo()'>Спробувати демо-пісню</button></div>";
-  }
-  html += "<div style='margin-top:14px'>";
-  for(const s of state.songs){
-    const c = counts(s);
-    const pct = v => c.total ? (v/c.total*100).toFixed(1) : 0;
-    html += "<div class='card songcard' onclick=\"go('song',{songId:'"+s.id+"',tab:'word'})\">"+
-      "<div class='songtitle'>"+esc(s.title)+"</div>"+
-      (s.artist?"<div class='sub'>"+esc(s.artist)+"</div>":"")+
-      "<div class='eq'>"+
-        "<i class='g' style='width:"+pct(c.know)+"%'></i>"+
-        "<i class='y' style='width:"+pct(c.unsure)+"%'></i>"+
-        "<i class='r' style='width:"+pct(c.dont)+"%'></i>"+
-        "<i class='n' style='width:"+pct(c.neu)+"%'></i></div>"+
-      "<div class='chips'>"+
-        "<span class='chip g'>знаю "+c.know+"</span>"+
-        "<span class='chip y'>сумніваюся "+c.unsure+"</span>"+
-        "<span class='chip r'>не знаю "+c.dont+"</span>"+
-        (c.neu?"<span class='chip'>нові "+c.neu+"</span>":"")+
-      "</div></div>";
-  }
-  html += "</div><div class='footer-note'>Дані зберігаються у твоєму акаунті. Прогрес «знаю» діє на всі пісні.</div>";
+  html += "</div><div class='footer-note'>Пісні і словник — окремі блоки, але слово, вивчене в одному, зараховується і в іншому.</div>";
   app.innerHTML = html;
+}
+function colCard(s, title, sub){
+  const c = counts(s);
+  const pct = v => c.total ? (v/c.total*100).toFixed(1) : 0;
+  return "<div class='card songcard' onclick=\"go('song',{songId:'"+s.id+"',tab:'word'})\">"+
+    "<div class='songtitle'>"+title+"</div>"+
+    (sub?"<div class='sub'>"+sub+"</div>":"")+
+    "<div class='eq'>"+
+      "<i class='g' style='width:"+pct(c.know)+"%'></i>"+
+      "<i class='y' style='width:"+pct(c.unsure)+"%'></i>"+
+      "<i class='r' style='width:"+pct(c.dont)+"%'></i>"+
+      "<i class='n' style='width:"+pct(c.neu)+"%'></i></div>"+
+    "<div class='chips'>"+
+      "<span class='chip g'>знаю "+c.know+"</span>"+
+      "<span class='chip y'>сумніваюся "+c.unsure+"</span>"+
+      "<span class='chip r'>не знаю "+c.dont+"</span>"+
+      (c.neu?"<span class='chip'>нові "+c.neu+"</span>":"")+
+    "</div></div>";
+}
+function doSearch(){
+  const inp = document.getElementById("searchin");
+  const res = document.getElementById("search-res");
+  const main = document.getElementById("libmain");
+  if(!inp || !res) return;
+  const q = norm(inp.value);
+  if(!q){ res.innerHTML=""; if(main) main.style.display=""; return; }
+  if(main) main.style.display = "none";
+  const out = [];
+  for(const col of allCols()){
+    for(const it of col.items){
+      if(norm(it.text).includes(q) || norm(it.t).includes(q)){
+        out.push({col, it});
+        if(out.length>=30) break;
+      }
+    }
+    if(out.length>=30) break;
+  }
+  if(!out.length){ res.innerHTML = "<div class='card'><p class='sub center'>Нічого не знайдено.</p></div>"; return; }
+  let html = "<div class='card'>";
+  for(const r of out){
+    const d = r.it.status==="know"?"g":r.it.status==="unsure"?"y":r.it.status==="dont"?"r":"n";
+    const src = r.col.deck ? r.col.level+" · "+r.col.lang : r.col.title;
+    html += "<div class='list-item' style='cursor:pointer' onclick=\"go('song',{songId:'"+r.col.id+"',tab:'"+r.it.kind+"'})\">"+
+      "<span class='dot "+d+"'></span>"+
+      "<div class='li-main'><div class='li-w'>"+esc(r.it.text)+"</div>"+
+      "<div class='li-t'>"+esc(r.it.t)+" · "+esc(src)+"</div></div></div>";
+  }
+  html += (out.length>=30?"<p class='sub center'>Показано перші 30 збігів.</p>":"")+"</div>";
+  res.innerHTML = html;
 }
 
 function loadDemo(){
@@ -482,7 +698,7 @@ function loadDemo(){
 function rImport(){
   app.innerHTML =
     "<div class='topbar'><h1>Нова пісня</h1>"+
-    "<button class='btn small ghost' onclick=\"go('library')\">← Назад</button></div>"+
+    "<button class='btn small ghost' onclick=\"go('library',{home:'songs'})\">← Назад</button></div>"+
     "<p class='sub'>1. Скопіюй промпт і встав його в чат із Claude разом із текстом пісні.<br>"+
     "2. Отриманий JSON встав сюди і натисни «Імпортувати».</p>"+
     "<button class='btn block' onclick='copyPrompt(this)'>Скопіювати промпт для чату</button>"+
@@ -505,18 +721,89 @@ function doImport(){
   go("song",{songId:r.song.id, tab:"word", flash:msg});
 }
 
+/* ---------- екран додавання слів у словник ---------- */
+function rDictImport(){
+  const langs = [...new Set(state.decks.map(d=>d.lang))];
+  const curLang = view.dictLang || langs[0] || "Англійська";
+  const curLevel = view.dictLevel || "A1";
+  let html =
+    "<div class='topbar'><h1>Додати слова</h1>"+
+    "<button class='btn small ghost' onclick=\"go('library',{home:'dict'})\">← Назад</button></div>"+
+    "<p class='sub'>Обери мову і рівень — промпт для Claude збереться автоматично. "+
+    "Слова доливаються порціями по 100: наступна порція продовжує список, дублікати відсіюються самі.</p>"+
+    "<h2>Мова</h2>"+
+    "<input id='dict-lang' class='field' list='langlist' placeholder='Англійська' value='"+esc(curLang)+"' oninput='updateDictHint()'>"+
+    "<datalist id='langlist'>"+langs.map(l=>"<option value='"+esc(l)+"'>").join("")+"</datalist>"+
+    "<h2>Рівень</h2><div class='row' id='lvlrow'>"+
+    LEVELS.map(l=>"<button class='btn small lvl "+(l===curLevel?"primary":"")+"' onclick=\"pickLevel('"+l+"')\">"+l+"</button>").join("")+
+    "</div>"+
+    "<div id='dict-hint' class='sub' style='margin-top:10px'></div>"+
+    "<button class='btn block' style='margin-top:10px' onclick='copyDictPrompt(this)'>Скопіювати промпт для чату</button>"+
+    "<h2>JSON від Claude</h2>"+
+    "<textarea id='dict-json' placeholder='{\"lang\":\"...\",\"level\":\"A1\",\"words\":[...]}'></textarea>"+
+    "<div id='dict-err' class='notice'></div>"+
+    "<button class='btn primary block' onclick='doDictImport()'>Імпортувати</button>";
+  app.innerHTML = html;
+  view.dictLevel = curLevel;
+  updateDictHint();
+}
+function dictSel(){
+  const el = document.getElementById("dict-lang");
+  return { lang:(el && el.value.trim()) || "Англійська", level: view.dictLevel || "A1" };
+}
+function pickLevel(l){
+  view.dictLevel = l;
+  document.querySelectorAll("#lvlrow .lvl").forEach(b=>b.classList.toggle("primary", b.textContent===l));
+  updateDictHint();
+}
+function updateDictHint(){
+  const el = document.getElementById("dict-hint");
+  if(!el) return;
+  const {lang, level} = dictSel();
+  view.dictLang = lang;
+  const d = findDeck(lang, level);
+  el.textContent = d
+    ? level+" · "+lang+": у блоці вже "+d.items.length+" карток, це буде порція №"+((d.parts||0)+1)
+    : level+" · "+lang+": буде створено новий блок, порція №1";
+}
+function copyDictPrompt(btn){
+  const {lang, level} = dictSel();
+  const d = findDeck(lang, level);
+  const part = d ? (d.parts||0)+1 : 1;
+  navigator.clipboard.writeText(dictPromptText(lang, level, part)).then(()=>{
+    btn.textContent = "Скопійовано ✓ (порція №"+part+")";
+    setTimeout(()=>btn.textContent="Скопіювати промпт для чату", 2000);
+  });
+}
+function doDictImport(){
+  const {lang, level} = dictSel();
+  const r = importDeck(lang, level, document.getElementById("dict-json").value);
+  if(r.err){ document.getElementById("dict-err").textContent = r.err; return; }
+  let msg = "Додано нових карток: "+r.added;
+  if(r.dup) msg += " · пропущено дублікатів: "+r.dup;
+  if(r.autoKnown) msg += " · уже вивчених (позначені «знаю»): "+r.autoKnown;
+  go("song",{songId:r.deck.id, tab:"word", flash:msg, home:"dict"});
+}
+function addMoreWords(){
+  const s = songById(view.songId);
+  if(!s || !s.deck) return;
+  go("dictimport",{dictLang:s.lang, dictLevel:s.level});
+}
+
 function rSong(){
   const s = songById(view.songId);
   if(!s) return go("library");
+  const isDeck = !!s.deck;
+  const home = isDeck ? "dict" : "songs";
   const c = counts(s);
   const items = s.items.filter(it=>it.kind===view.tab);
   const order = {dont:0, unsure:1, neu:2, know:3};
   const sorted = items.slice().sort((a,b)=>
     (order[a.status==="new"?"neu":a.status]??2)-(order[b.status==="new"?"neu":b.status]??2));
   let html =
-    "<div class='topbar'><div><h1>"+esc(s.title)+"</h1>"+
-    (s.artist?"<div class='sub'>"+esc(s.artist)+"</div>":"")+"</div>"+
-    "<button class='btn small ghost' onclick=\"go('library')\">← Пісні</button></div>";
+    "<div class='topbar'><div><h1>"+esc(isDeck?s.level:s.title)+"</h1>"+
+    (isDeck?"<div class='sub'>"+esc(s.lang)+"</div>":(s.artist?"<div class='sub'>"+esc(s.artist)+"</div>":""))+"</div>"+
+    "<button class='btn small ghost' onclick=\"go('library',{home:'"+home+"'})\">← Назад</button></div>";
   if(view.flash){ html += "<div class='notice'>"+esc(view.flash)+"</div>"; view.flash=""; }
   html += "<div class='row'>";
   if(c.neu>0) html += "<button class='btn primary' onclick=\"startStudy('sort')\">Сортувати нові ("+c.neu+")</button>";
@@ -524,24 +811,28 @@ function rSong(){
   if(c.know===c.total && c.total>0) html += "<button class='btn green' onclick='startTest()'>Фінальний тест</button>";
   else if(c.know>0) html += "<button class='btn' onclick='startTest()'>Тест</button>";
   html += "</div>";
+  if(isDeck) html += "<button class='btn block' style='margin-top:10px' onclick='addMoreWords()'>+ Додати ще слів у цей блок</button>";
   if(c.know===c.total && c.total>0)
-    html += "<div class='card center'>🎧 <b>Все вивчено!</b><div class='sub'>Час увімкнути пісню і зрозуміти кожне слово.</div></div>";
+    html += isDeck
+      ? "<div class='card center'>🏆 <b>Блок вивчено!</b><div class='sub'>Можна долити наступну порцію слів або перейти на рівень вище.</div></div>"
+      : "<div class='card center'>🎧 <b>Все вивчено!</b><div class='sub'>Час увімкнути пісню і зрозуміти кожне слово.</div></div>";
   html += "<div class='tabs'>"+
     "<div class='tab "+(view.tab==="word"?"active":"")+"' onclick=\"go('song',{tab:'word'})\">Слова ("+s.items.filter(i=>i.kind==="word").length+")</div>"+
     "<div class='tab "+(view.tab==="phrase"?"active":"")+"' onclick=\"go('song',{tab:'phrase'})\">Фрази ("+s.items.filter(i=>i.kind==="phrase").length+")</div></div>";
   html += "<div class='card'>";
   if(!sorted.length) html += "<p class='sub center'>Тут порожньо.</p>";
+  else html += "<p class='sub' style='margin-top:0'>Тапни по слову, щоб почути вимову 🔊</p>";
   for(const it of sorted){
     const d = it.status==="know"?"g":it.status==="unsure"?"y":it.status==="dont"?"r":"n";
     html += "<div class='list-item'><span class='dot "+d+"'></span>"+
-      "<div class='li-main'><div class='li-w'>"+esc(it.text)+"</div>"+
+      "<div class='li-main' style='cursor:pointer' onclick=\"speakItem('"+it.id+"')\"><div class='li-w'>"+esc(it.text)+"</div>"+
       "<div class='li-t'>"+esc(it.t)+"</div></div>"+
       "<button class='del-x' onclick=\"delItem('"+it.id+"',this)\">✕</button></div>";
   }
   html += "</div>";
   html += "<div class='row' style='margin-top:4px'>"+
     "<button class='btn small' style='background:transparent;border-color:var(--red);color:var(--red)' onclick='resetSong(this)'>Скинути прогрес</button>"+
-    "<button class='btn small' style='background:transparent;border-color:var(--red);color:var(--red)' onclick='delSong(this)'>Видалити пісню</button></div>";
+    "<button class='btn small' style='background:transparent;border-color:var(--red);color:var(--red)' onclick='delSong(this)'>"+(isDeck?"Видалити блок":"Видалити пісню")+"</button></div>";
   app.innerHTML = html;
 }
 function delItem(id, btn){
@@ -560,8 +851,11 @@ function delItem(id, btn){
 }
 function delSong(btn){
   armConfirm(btn, ()=>{
-    state.songs = state.songs.filter(s=>s.id!==view.songId);
-    rebuildKnown(); save(); go("library");
+    const s = songById(view.songId);
+    const isDeck = !!(s && s.deck);
+    if(isDeck) state.decks = state.decks.filter(d=>d.id!==view.songId);
+    else state.songs = state.songs.filter(x=>x.id!==view.songId);
+    rebuildKnown(); save(); go("library",{home:isDeck?"dict":"songs"});
   });
 }
 function resetSong(btn){
@@ -581,24 +875,25 @@ function startStudy(mode){
   session = {mode, queue, done:0, total:queue.length, flipped:false, global:false};
   go("study");
 }
-function startGlobalStudy(){
+function startGlobalStudy(scope){
   const queue = shuffle(
-    state.songs.flatMap(s=>s.items.filter(i=>i.status==="dont"||i.status==="unsure"))
+    scopeCols(scope).flatMap(s=>s.items.filter(i=>i.status==="dont"||i.status==="unsure"))
   );
   if(!queue.length) return;
-  session = {mode:"learn", queue, done:0, total:queue.length, flipped:false, global:true};
+  session = {mode:"learn", queue, done:0, total:queue.length, flipped:false, global:true, scope};
   view.songId = null;
   go("study");
 }
-function startGlobalTest(){
-  const pool = state.songs.flatMap(s=>s.items.filter(i=>i.status!=="new"));
+function startGlobalTest(scope){
+  const pool = scopeCols(scope).flatMap(s=>s.items.filter(i=>i.status!=="new"));
   if(!pool.length) return;
-  const allT = state.songs.flatMap(x=>x.items.map(i=>i.t));
+  let allT = scopeCols(scope).flatMap(x=>x.items.map(i=>i.t));
+  if(new Set(allT).size < 8) allT = allCols().flatMap(x=>x.items.map(i=>i.t));
   const qs = shuffle(pool).map(it=>{
     const wrong = shuffle(allT.filter(t=>t!==it.t)).slice(0,3);
     return {it, options:shuffle([it.t, ...wrong])};
   });
-  session = {qs, idx:0, score:0, answered:null, global:true};
+  session = {qs, idx:0, score:0, answered:null, global:true, scope};
   go("test");
 }
 function flip(){ session.flipped = true; rStudy(); }
@@ -613,16 +908,17 @@ function rStudy(){
   if(!session || !session.queue.length){
     let summary;
     if(isGlobal){
-      const tk=state.songs.reduce((n,sg)=>n+counts(sg).know,0);
-      const tu=state.songs.reduce((n,sg)=>n+counts(sg).unsure,0);
-      const td=state.songs.reduce((n,sg)=>n+counts(sg).dont,0);
-      summary="Знаю: "+tk+" · Сумніваюся: "+tu+" · Не знаю: "+td;
+      const cols = scopeCols(session.scope);
+      const tk=cols.reduce((n,sg)=>n+counts(sg).know,0);
+      const tu=cols.reduce((n,sg)=>n+counts(sg).unsure,0);
+      const td=cols.reduce((n,sg)=>n+counts(sg).dont,0);
+      summary=(session.scope==="dict"?"Словник — ":"Пісні — ")+"знаю: "+tk+" · сумніваюся: "+tu+" · не знаю: "+td;
     } else {
       const c=counts(s); summary="Знаю: "+c.know+" · Сумніваюся: "+c.unsure+" · Не знаю: "+c.dont;
     }
     const backBtn = isGlobal
       ? "<button class='btn primary block' onclick=\"go('library')\">До бібліотеки</button>"
-      : "<button class='btn primary block' onclick=\"go('song')\">До пісні</button>";
+      : "<button class='btn primary block' onclick=\"go('song')\">Назад</button>";
     app.innerHTML = "<div class='card center study'><div>"+
       "<div class='bignum'>✓</div><h2>"+(session&&session.mode==="sort"?"Відсортовано!":"Прогін завершено!")+"</h2>"+
       "<p class='sub'>"+summary+"</p>"+
@@ -631,6 +927,8 @@ function rStudy(){
     session = null; save(); return;
   }
   const it = session.queue[0];
+  const spk = "<button class='spk' onclick='speakCur()'>🔊</button>";
+  const trLine = it.tr?"<div style='color:var(--muted);font-size:15px;margin-bottom:4px'>["+esc(it.tr)+"]</div>":"";
   const streakHint = (it.status==="unsure" && session.mode!=="sort")
     ? " · повторень: "+((it.unsureStreak||0)+1)+"/2" : "";
   const head = "<div class='progressline' style='display:flex;justify-content:space-between;align-items:center'>"+
@@ -638,38 +936,46 @@ function rStudy(){
     "<button class='btn small ghost' onclick=\"endStudy()\">На сьогодні досить</button></div>";
   if(session.mode==="sort"){
     app.innerHTML = "<div class='card study'>"+head+
-      "<div>"+kindTag(it)+"<div class='word'>"+esc(it.text)+"</div>"+
-      (it.tr?"<div style='color:var(--muted);font-size:15px;margin-bottom:4px'>["+esc(it.tr)+"]</div>":"")+
+      "<div>"+kindTag(it)+"<div class='word'>"+esc(it.text)+" "+spk+"</div>"+trLine+
       "<div class='trans'>"+esc(it.t)+"</div>"+highlightCtx(it)+"</div>"+
       "<div class='row'>"+
       "<button class='btn green' onclick=\"answerSort('know')\">Знаю</button>"+
       "<button class='btn yellow' onclick=\"answerSort('unsure')\">Сумніваюся</button>"+
       "<button class='btn red' onclick=\"answerSort('dont')\">Не знаю</button></div></div>";
   } else {
-    let body = "<div>"+kindTag(it)+"<div class='word'>"+esc(it.text)+"</div>"+
-      (it.tr?"<div style='color:var(--muted);font-size:15px;margin-bottom:4px'>["+esc(it.tr)+"]</div>":"");
-    if(session.flipped) body += "<div class='trans'>"+esc(it.t)+"</div>"+highlightCtx(it);
-    else body += highlightCtx(it);
-    body += "</div>";
+    /* друга стадія (сумніваюся) — зворотна картка: переклад → згадай слово */
+    const rev = it.status==="unsure";
+    let body;
+    if(rev){
+      body = "<div>"+kindTag(it)+"<span class='tag'>згадай слово</span>"+
+        "<div class='word'>"+esc(it.t)+"</div>";
+      if(session.flipped) body += "<div class='trans'>"+esc(it.text)+" "+spk+"</div>"+trLine+highlightCtx(it);
+      body += "</div>";
+    } else {
+      body = "<div>"+kindTag(it)+"<div class='word'>"+esc(it.text)+" "+spk+"</div>"+trLine;
+      if(session.flipped) body += "<div class='trans'>"+esc(it.t)+"</div>"+highlightCtx(it);
+      else body += highlightCtx(it);
+      body += "</div>";
+    }
     let controls = session.flipped
       ? "<div class='row'><button class='btn green' onclick='answerLearn(true)'>Пам'ятаю</button>"+
         "<button class='btn red' onclick='answerLearn(false)'>Ще ні</button></div>"
-      : "<button class='btn primary block' onclick='flip()'>Показати переклад</button>";
+      : "<button class='btn primary block' onclick='flip()'>"+(rev?"Показати слово":"Показати переклад")+"</button>";
     app.innerHTML = "<div class='card study'>"+head+body+controls+"</div>";
   }
 }
 function answerSort(st){
   const it = session.queue.shift();
   if(st==="know") markKnown(it);
-  else { it.status = st; it.unsureStreak = 0; }
-  save(); rStudy();
+  else setStatusAll(it, st);
+  bumpDaily(); save(); rStudy();
 }
 function answerLearn(remembered){
   const it = session.queue.shift();
   session.flipped = false;
   if(remembered){
     if(it.status==="dont"){
-      it.status="unsure"; it.unsureStreak=0;
+      setStatusAll(it, "unsure");
     } else if(it.status==="unsure"){
       it.unsureStreak = (it.unsureStreak||0) + 1;
       if(it.unsureStreak >= 2) markKnown(it);
@@ -679,14 +985,16 @@ function answerLearn(remembered){
   } else {
     demoteItem(it);
   }
-  save(); rStudy();
+  bumpDaily(); save(); rStudy();
 }
 
 /* ---------- test ---------- */
 function startTest(){
   const s = songById(view.songId);
   const pool = s.items.filter(i=>i.status!=="new");
-  const allT = state.songs.flatMap(x=>x.items.map(i=>i.t));
+  /* варіанти відповідей беремо зі свого блока: пісні — з пісень, словник — зі словника */
+  let allT = (s.deck ? state.decks : state.songs).flatMap(x=>x.items.map(i=>i.t));
+  if(new Set(allT).size < 8) allT = allCols().flatMap(x=>x.items.map(i=>i.t));
   const qs = shuffle(pool).map(it=>{
     const wrong = shuffle(allT.filter(t=>t!==it.t)).slice(0,3);
     return {it, options:shuffle([it.t, ...wrong])};
@@ -700,11 +1008,11 @@ function rTest(){
     const isGlobal = session.global;
     const backBtn = isGlobal
       ? "<button class='btn primary block' onclick=\"go('library')\">До бібліотеки</button>"
-      : "<button class='btn primary block' onclick=\"go('song')\">До пісні</button>";
+      : "<button class='btn primary block' onclick=\"go('song')\">Назад</button>";
     app.innerHTML = "<div class='card center study'><div>"+
       "<div class='bignum'>"+session.score+"/"+session.qs.length+"</div>"+
       "<h2>"+(ok?"Ідеально! 🎧":"Непогано!")+"</h2>"+
-      "<p class='sub'>"+(ok?"Вмикай пісню — тепер ти зрозумієш кожен рядок.":"Слова з помилками відкочено на крок назад, прожени «Вчити» ще раз.")+"</p></div>"+
+      "<p class='sub'>"+(ok?"Все відповіли правильно — так тримати!":"Слова з помилками відкочено на крок назад, прожени «Вчити» ще раз.")+"</p></div>"+
       backBtn+"</div>";
     session = null; return;
   }
@@ -716,7 +1024,7 @@ function rTest(){
     "<span>Тест · "+(session.idx+1)+" з "+session.qs.length+
     (answered>0?" · <span style='color:var(--green)'>✓"+session.score+"</span>"+(wrongSoFar>0?" <span style='color:var(--red)'>✗"+wrongSoFar+"</span>":""):"")+"</span>"+
     "<button class='btn small ghost' onclick='exitTest()'>На сьогодні досить</button></div>"+
-    kindTag(q.it)+"<div class='word'>"+esc(q.it.text)+"</div>"+
+    kindTag(q.it)+"<div class='word'>"+esc(q.it.text)+" <button class='spk' onclick='speakTest()'>🔊</button></div>"+
     (q.it.tr?"<div style='color:var(--muted);font-size:15px;margin-bottom:4px'>["+esc(q.it.tr)+"]</div>":"")+
     highlightCtx(q.it)+"<div style='margin-top:14px'>";
   q.options.forEach((opt,i)=>{
@@ -740,7 +1048,8 @@ function answerTest(i){
   session.answeredCount = (session.answeredCount||0) + 1;
   const q = session.qs[session.idx];
   if(q.options[i]===q.it.t) session.score++;
-  else { demoteItem(q.it); save(); }
+  else demoteItem(q.it);
+  bumpDaily(); save();
   rTest();
 }
 function nextTest(){ session.idx++; session.answered=null; rTest(); }
@@ -752,7 +1061,7 @@ function exitTest(){
   const isGlobal = session.global;
   const backBtn = isGlobal
     ? "<button class='btn primary block' onclick=\"go('library')\">До бібліотеки</button>"
-    : "<button class='btn primary block' onclick=\"go('song')\">До пісні</button>";
+    : "<button class='btn primary block' onclick=\"go('song')\">Назад</button>";
   app.innerHTML = "<div class='card center study'><div>"+
     "<div class='bignum'>"+correct+"/"+answered+"</div>"+
     "<h2>Тест зупинено</h2>"+
@@ -766,33 +1075,75 @@ function exitTest(){
   session = null; save();
 }
 
+/* ---------- гарячі клавіші (для комп'ютера) ---------- */
+document.addEventListener("keydown", e=>{
+  const t = e.target;
+  if(t && (t.tagName==="INPUT" || t.tagName==="TEXTAREA")) return;
+  if(view.screen==="study" && session && session.queue && session.queue.length){
+    if(session.mode==="sort"){
+      if(e.key==="1") answerSort("know");
+      else if(e.key==="2") answerSort("unsure");
+      else if(e.key==="3") answerSort("dont");
+    } else {
+      if(!session.flipped && (e.key===" " || e.key==="Enter")){ e.preventDefault(); flip(); }
+      else if(session.flipped && e.key==="1") answerLearn(true);
+      else if(session.flipped && e.key==="2") answerLearn(false);
+    }
+  } else if(view.screen==="test" && session && session.qs && session.idx < session.qs.length){
+    if(session.answered===null && ["1","2","3","4"].includes(e.key)){
+      const q = session.qs[session.idx];
+      if(+e.key <= q.options.length) answerTest(+e.key-1);
+    } else if(session.answered!==null && (e.key===" " || e.key==="Enter")){
+      e.preventDefault(); nextTest();
+    }
+  }
+});
+
 /* ---------- stats ---------- */
 function rStats(){
   const knownCount = Object.keys(state.known).length;
-  let totalItems=0, learned=0;
-  for(const s of state.songs){ totalItems += s.items.length; learned += counts(s).know; }
+  const stk = streakDays(), today = state.daily[dayKey()]||0;
+  const sum = cols => {
+    let total=0, know=0;
+    for(const s of cols){ total += s.items.length; know += counts(s).know; }
+    return {total, know};
+  };
+  const sSongs = sum(state.songs), sDecks = sum(state.decks);
+  /* спільна частина */
   let html = "<div class='topbar'><h1>Статистика</h1>"+
     "<button class='btn small ghost' onclick=\"go('library')\">← Назад</button></div>"+
     "<div class='card center'><div class='bignum'>"+knownCount+"</div>"+
-    "<div class='sub'>унікальних слів у твоєму словнику</div></div>"+
-    "<div class='card'><div class='list-item'><div class='li-main'>Пісень у бібліотеці</div><b>"+state.songs.length+"</b></div>"+
-    "<div class='list-item'><div class='li-main'>Всього карток (слова + фрази)</div><b>"+totalItems+"</b></div>"+
-    "<div class='list-item'><div class='li-main'>Вивчено карток</div><b>"+learned+"</b></div></div>";
-  if(state.songs.length){
-    html += "<h2>По піснях</h2><div class='card'>";
-    for(const s of state.songs){
-      const c = counts(s);
-      html += "<div class='list-item'><div class='li-main'><div class='li-w'>"+esc(s.title)+"</div></div>"+
-        "<span class='sub'>"+c.know+" / "+c.total+"</span></div>";
-    }
-    html += "</div>";
+    "<div class='sub'>унікальних слів у твоєму словнику (пісні + словник разом)</div></div>"+
+    "<div class='card'>"+
+    "<div class='list-item'><div class='li-main'>🔥 Серія днів підряд</div><b>"+stk+"</b></div>"+
+    "<div class='list-item'><div class='li-main'>Карток сьогодні</div><b>"+today+"</b></div>"+
+    "<div class='list-item'><div class='li-main'>Всього карток</div><b>"+(sSongs.total+sDecks.total)+"</b></div></div>";
+  /* блок пісень */
+  html += "<h2>🎵 Пісні</h2><div class='card'>"+
+    "<div class='list-item'><div class='li-main'>Пісень</div><b>"+state.songs.length+"</b></div>"+
+    "<div class='list-item'><div class='li-main'>Карток / вивчено</div><b>"+sSongs.know+" / "+sSongs.total+"</b></div>";
+  for(const s of state.songs){
+    const c = counts(s);
+    html += "<div class='list-item'><div class='li-main'><div class='li-w'>"+esc(s.title)+"</div></div>"+
+      "<span class='sub'>"+c.know+" / "+c.total+"</span></div>";
   }
+  html += "</div>";
+  /* блок словника */
+  html += "<h2>📚 Словник</h2><div class='card'>"+
+    "<div class='list-item'><div class='li-main'>Блоків</div><b>"+state.decks.length+"</b></div>"+
+    "<div class='list-item'><div class='li-main'>Карток / вивчено</div><b>"+sDecks.know+" / "+sDecks.total+"</b></div>";
+  for(const d of state.decks){
+    const c = counts(d);
+    html += "<div class='list-item'><div class='li-main'><div class='li-w'>"+esc(d.level)+" · "+esc(d.lang)+"</div></div>"+
+      "<span class='sub'>"+c.know+" / "+c.total+"</span></div>";
+  }
+  html += "</div>";
   html += "<h2>Синхронізація з GitHub</h2>"+
     "<div class='card'>"+
     "<p class='sub' style='margin-top:0'>Прогрес зберігатиметься у файл progress.json твого репозиторію і підтягуватиметься на всіх пристроях.</p>"+
-    "<input id='gh-owner' placeholder='Нік на GitHub' value='"+esc(sync.owner)+"' style='width:100%;margin-bottom:8px;background:var(--surface2);color:var(--text);border:1px solid var(--line);border-radius:10px;padding:10px;font:inherit'>"+
-    "<input id='gh-repo' placeholder='Назва репозиторію (lyrics-trainer)' value='"+esc(sync.repo)+"' style='width:100%;margin-bottom:8px;background:var(--surface2);color:var(--text);border:1px solid var(--line);border-radius:10px;padding:10px;font:inherit'>"+
-    "<input id='gh-token' type='password' placeholder='Токен доступу (github_pat_...)' value='"+esc(sync.token)+"' style='width:100%;margin-bottom:8px;background:var(--surface2);color:var(--text);border:1px solid var(--line);border-radius:10px;padding:10px;font:inherit'>"+
+    "<input id='gh-owner' class='field' placeholder='Нік на GitHub' value='"+esc(sync.owner)+"'>"+
+    "<input id='gh-repo' class='field' placeholder='Назва репозиторію (lyrics-trainer)' value='"+esc(sync.repo)+"'>"+
+    "<input id='gh-token' class='field' type='password' placeholder='Токен доступу (github_pat_...)' value='"+esc(sync.token)+"'>"+
     "<div class='row'>"+
     "<button class='btn primary' onclick='connectSync()'>"+(syncOn()?"Оновити й перевірити":"Підключити")+"</button>"+
     (syncOn()?"<button class='btn' onclick='syncNow()'>Синхронізувати зараз</button>":"")+
@@ -812,12 +1163,12 @@ function rStats(){
     "<button class='btn primary block' onclick='importData()'>Відновити з копії</button></div>";
   html += "<h2>Небезпечна зона</h2>"+
     "<button class='btn small block' style='background:transparent;border-color:var(--red);color:var(--red)' onclick='resetAll(this)'>Скинути весь прогрес</button>"+
-    "<p class='sub' style='margin-top:6px'>Пісні залишаться, але всі слова стануть «новими», а словник очиститься.</p>";
+    "<p class='sub' style='margin-top:6px'>Пісні та блоки словника залишаться, але всі картки стануть «новими», а словник вивчених слів очиститься.</p>";
   app.innerHTML = html;
 }
 function resetAll(btn){
   armConfirm(btn, ()=>{
-    for(const s of state.songs) for(const it of s.items) it.status = "new";
+    for(const s of allCols()) for(const it of s.items) it.status = "new";
     state.known = {};
     save(); go("stats");
   });
@@ -861,8 +1212,8 @@ function importData(){
   try{
     const data = JSON.parse(document.getElementById("backup-ta").value.trim());
     if(!Array.isArray(data.songs)) throw 0;
-    state = { songs: data.songs, known: data.known || {} };
-    rebuildKnown(); save();
+    state = { songs: data.songs, decks: data.decks || [], known: data.known || {}, daily: data.daily || {} };
+    normState(); rebuildKnown(); save();
     go("library");
   }catch(e){ msg.textContent = "Це не схоже на резервну копію — перевір, що вставлено весь текст."; }
 }
