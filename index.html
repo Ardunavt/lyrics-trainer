@@ -121,7 +121,10 @@ function normState(){
   if(!state.daily || typeof state.daily !== "object") state.daily = {};
   for(const d of state.decks){
     const c = deckLangCode(d.lang);
-    for(const it of d.items) if(!it.lc) it.lc = c;
+    for(const it of d.items){
+      if(!it.lc) it.lc = c;
+      if(it.kind==="word" && !it.pos) it.pos = "other";
+    }
   }
 }
 const allCols = () => state.songs.concat(state.decks);
@@ -212,21 +215,23 @@ function speak(text, code){
     speechSynthesis.speak(u);
   }catch(e){}
 }
+/* озвучуємо разом з артиклем (der Hund) — так запам'ятовується рід */
+const speakStr = it => (it.a ? it.a+" " : "")+it.text;
 function speakCur(){
   if(!session || !session.queue || !session.queue.length) return;
   const it = session.queue[0];
-  speak(it.text, it.lc);
+  speak(speakStr(it), it.lc);
 }
 function speakTest(){
   if(!session || !session.qs) return;
   const q = session.qs[session.idx];
-  if(q) speak(q.it.text, q.it.lc);
+  if(q) speak(speakStr(q.it), q.it.lc);
 }
 function speakItem(id){
   const s = songById(view.songId);
   if(!s) return;
   const it = s.items.find(i=>i.id===id);
-  if(it) speak(it.text, it.lc);
+  if(it) speak(speakStr(it), it.lc);
 }
 
 /* ---------- щоденна серія ---------- */
@@ -440,6 +445,9 @@ function highlightCtx(it){
   return "<div class='ctx'>«"+esc(it.c).replace(re,"<b>$1</b>")+"»</div>";
 }
 const kindTag = it => it.kind==="phrase" ? "<span class='tag'>фраза</span>" : "";
+/* слово з артиклем для відображення: <сірий артикль> слово */
+const wordDisp = it => (it.a ? "<span style='color:var(--muted)'>"+esc(it.a)+"</span> " : "")+esc(it.text);
+const posTag = it => (it.kind==="word" && it.pos && POS_ONE[it.pos]) ? "<span class='tag'>"+POS_ONE[it.pos]+"</span>" : "";
 
 /* ---------- import: пісні ---------- */
 const PROMPT_TEXT =
@@ -497,6 +505,11 @@ function importSong(jsonText){
 
 /* ---------- import: словник за рівнями ---------- */
 const LEVELS = ["A1","A2","B1","B2","C1","C2"];
+/* частини мови для групування слів у блоках словника */
+const POS_ORDER = ["noun","verb","adj","adv","other"];
+const POS_LABELS = {noun:"Іменники", verb:"Дієслова", adj:"Прикметники", adv:"Прислівники", other:"Інше"};
+const POS_ONE = {noun:"іменник", verb:"дієслово", adj:"прикметник", adv:"прислівник"};
+const sanePos = p => POS_ORDER.includes(p) ? p : "other";
 const findDeck = (lang, level) => state.decks.find(d=>norm(d.lang)===norm(lang) && d.level===level);
 
 function dictPromptText(lang, level, part){
@@ -512,7 +525,9 @@ function dictPromptText(lang, level, part){
 "- Лише значущі слова рівня "+level+": іменники, дієслова, прикметники, прислівники\n"+
 "- Слово давай у базовій формі: інфінітив для дієслів, однина для іменників\n"+
 "- Для кожного слова:\n"+
-'  "w" — слово\n'+
+'  "w" — слово (без артикля)\n'+
+'  "pos" — частина мови, СТРОГО одне з: noun / verb / adj / adv / other\n'+
+'  "a" — ТІЛЬКИ для іменників і ТІЛЬКИ якщо в цій мові іменники мають артикль або граматичний рід (німецька: der/die/das, французька: le/la, іспанська: el/la тощо) — означений артикль однини в називному відмінку. Для англійської та мов без артиклів поле "a" не додавай узагалі\n'+
 '  "t" — переклад українською; якщо кілька значень — через крапку з комою\n'+
 '  "c" — коротке просте речення-приклад із цим словом (складність не вище рівня '+level+")\n"+
 '  "tr" — транскрипція IPA тільки для слів із неочевидною вимовою; для простих слів поле не додавай\n'+
@@ -521,7 +536,7 @@ function dictPromptText(lang, level, part){
 '  "t" — переклад або пояснення українською\n'+
 '  "c" — коротке речення-приклад\n'+
 "\n3. Формат: віддай результат СУВОРО одним JSON-блоком, без жодного пояснення або тексту до чи після. Перший символ — {, останній — }.\n\n"+
-'{"lang":"'+lang+'","level":"'+level+'","words":[{"w":"...","t":"...","c":"..."},{"w":"...","t":"...","c":"...","tr":"..."}],"phrases":[{"p":"...","t":"...","c":"..."}]}';
+'{"lang":"'+lang+'","level":"'+level+'","words":[{"w":"...","pos":"noun","a":"der","t":"...","c":"..."},{"w":"...","pos":"verb","t":"...","c":"...","tr":"..."}],"phrases":[{"p":"...","t":"...","c":"..."}]}';
 }
 
 function importDeck(lang, level, jsonText){
@@ -534,31 +549,43 @@ function importDeck(lang, level, jsonText){
   const fresh = !deck;
   if(fresh) deck = {id:uid(), deck:true, lang, level, items:[], parts:0, added:Date.now()};
   const lc = deckLangCode(lang);
-  const have = new Set(deck.items.map(i=>i.kind+"|"+norm(i.text)));
-  let added=0, dup=0, autoKnown=0;
+  const have = new Map(deck.items.map(i=>[i.kind+"|"+norm(i.text), i]));
+  let added=0, dup=0, upd=0, autoKnown=0;
   for(const w of (data.words||[])){
     if(!w.w || !w.t) continue;
     const k = "word|"+norm(w.w);
-    if(have.has(k)){ dup++; continue; }
-    have.add(k);
-    const it = {id:uid(), kind:"word", text:w.w, t:w.t, c:w.c||"", tr:w.tr||"", status:"new", lc};
+    const ex = have.get(k);
+    if(ex){
+      dup++;
+      /* дублікат — але доповнюємо наявну картку новими даними (категорія, артикль, транскрипція) */
+      let ch = false;
+      const p = sanePos(w.pos);
+      if(w.pos && p!=="other" && (!ex.pos || ex.pos==="other")){ ex.pos = p; ch = true; }
+      if(w.a && !ex.a){ ex.a = String(w.a); ch = true; }
+      if(w.tr && !ex.tr){ ex.tr = w.tr; ch = true; }
+      if(w.c && !ex.c){ ex.c = w.c; ch = true; }
+      if(ch) upd++;
+      continue;
+    }
+    const it = {id:uid(), kind:"word", text:w.w, t:w.t, c:w.c||"", tr:w.tr||"", status:"new", lc, pos:sanePos(w.pos)};
+    if(w.a) it.a = String(w.a);
     if(state.known[norm(w.w)]){ it.status="know"; autoKnown++; }
-    deck.items.push(it); added++;
+    deck.items.push(it); have.set(k, it); added++;
   }
   for(const p of (data.phrases||[])){
     if(!p.p || !p.t) continue;
     const k = "phrase|"+norm(p.p);
     if(have.has(k)){ dup++; continue; }
-    have.add(k);
-    deck.items.push({id:uid(), kind:"phrase", text:p.p, t:p.t, c:p.c||"", status:"new", lc});
+    const it = {id:uid(), kind:"phrase", text:p.p, t:p.t, c:p.c||"", status:"new", lc};
+    deck.items.push(it); have.set(k, it);
     added++;
   }
-  if(!added && fresh) return {err:"Список слів порожній."};
-  if(!added) return {err:"Усі "+dup+" карток уже є в цьому блоці. Скопіюй промпт ще раз — він попросить наступну порцію (№"+((deck.parts||0)+1)+")."};
+  if(!added && !upd && fresh) return {err:"Список слів порожній."};
+  if(!added && !upd) return {err:"Усі "+dup+" карток уже є в цьому блоці. Скопіюй промпт ще раз — він попросить наступну порцію (№"+((deck.parts||0)+1)+")."};
   if(fresh) state.decks.push(deck);
-  deck.parts = (deck.parts||0)+1;
+  if(added) deck.parts = (deck.parts||0)+1;
   save();
-  return {deck, added, dup, autoKnown};
+  return {deck, added, dup, upd, autoKnown};
 }
 
 /* ---------- demo song (вигаданий текст, не реальна пісня) ---------- */
@@ -656,7 +683,7 @@ function rLibrary(){
       }
     }
   }
-  html += "</div><div class='footer-note'>Пісні і словник — окремі блоки, але слово, вивчене в одному, зараховується і в іншому. · v1.3</div>";
+  html += "</div><div class='footer-note'>Пісні і словник — окремі блоки, але слово, вивчене в одному, зараховується і в іншому. · v1.4</div>";
   app.innerHTML = html;
 }
 function colCard(s, title, sub){
@@ -702,7 +729,7 @@ function doSearch(){
     const src = r.col.deck ? r.col.level+" · "+r.col.lang : r.col.title;
     html += "<div class='list-item' style='cursor:pointer' onclick=\"go('song',{songId:'"+r.col.id+"',tab:'"+r.it.kind+"'})\">"+
       "<span class='dot "+d+"'></span>"+
-      "<div class='li-main'><div class='li-w'>"+esc(r.it.text)+"</div>"+
+      "<div class='li-main'><div class='li-w'>"+wordDisp(r.it)+"</div>"+
       "<div class='li-t'>"+esc(r.it.t)+" · "+esc(src)+"</div></div></div>";
   }
   html += (out.length>=30?"<p class='sub center'>Показано перші 30 збігів.</p>":"")+"</div>";
@@ -801,7 +828,8 @@ function doDictImport(){
   if(r.err){ document.getElementById("dict-err").textContent = r.err; return; }
   syncPushNow();
   let msg = "Додано нових карток: "+r.added;
-  if(r.dup) msg += " · пропущено дублікатів: "+r.dup;
+  if(r.dup) msg += " · дублікатів: "+r.dup;
+  if(r.upd) msg += " (з них оновлено категорії/артиклі: "+r.upd+")";
   if(r.autoKnown) msg += " · уже вивчених (позначені «знаю»): "+r.autoKnown;
   go("song",{songId:r.deck.id, tab:"word", flash:msg, home:"dict"});
 }
@@ -811,16 +839,39 @@ function addMoreWords(){
   go("dictimport",{dictLang:s.lang, dictLevel:s.level});
 }
 
+function itemRow(it){
+  const d = it.status==="know"?"g":it.status==="unsure"?"y":it.status==="dont"?"r":"n";
+  return "<div class='list-item'><span class='dot "+d+"'></span>"+
+    "<div class='li-main' style='cursor:pointer' onclick=\"speakItem('"+it.id+"')\"><div class='li-w'>"+wordDisp(it)+"</div>"+
+    "<div class='li-t'>"+esc(it.t)+"</div></div>"+
+    "<button class='del-x' onclick=\"delItem('"+it.id+"',this)\">✕</button></div>";
+}
+function sortByStatus(items){
+  const order = {dont:0, unsure:1, neu:2, know:3};
+  return items.slice().sort((a,b)=>
+    (order[a.status==="new"?"neu":a.status]??2)-(order[b.status==="new"?"neu":b.status]??2));
+}
+/* картка групи (іменники / дієслова / ... / фрази) всередині блока словника */
+function grpCard(g){
+  const neu = g.items.filter(i=>i.status==="new").length;
+  const learn = g.items.filter(i=>i.status==="dont"||i.status==="unsure").length;
+  let html = "<div class='card'>"+
+    "<div style='display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:6px'>"+
+    "<b>"+g.label+" ("+g.items.length+")</b><div style='display:flex;gap:6px'>"+
+    (neu?"<button class='btn small primary' onclick=\"startStudy('sort','"+g.key+"')\">Сортувати "+neu+"</button>":"")+
+    (learn?"<button class='btn small yellow' onclick=\"startStudy('learn','"+g.key+"')\">Вчити "+learn+"</button>":"")+
+    ((!neu && !learn)?"<span class='chip g'>вивчено ✓</span>":"")+
+    "</div></div>";
+  for(const it of sortByStatus(g.items)) html += itemRow(it);
+  html += "</div>";
+  return html;
+}
 function rSong(){
   const s = songById(view.songId);
   if(!s) return go("library");
   const isDeck = !!s.deck;
   const home = isDeck ? "dict" : "songs";
   const c = counts(s);
-  const items = s.items.filter(it=>it.kind===view.tab);
-  const order = {dont:0, unsure:1, neu:2, know:3};
-  const sorted = items.slice().sort((a,b)=>
-    (order[a.status==="new"?"neu":a.status]??2)-(order[b.status==="new"?"neu":b.status]??2));
   let html =
     "<div class='topbar'><div><h1>"+esc(isDeck?s.level:s.title)+"</h1>"+
     (isDeck?"<div class='sub'>"+esc(s.lang)+"</div>":(s.artist?"<div class='sub'>"+esc(s.artist)+"</div>":""))+"</div>"+
@@ -828,7 +879,7 @@ function rSong(){
   if(view.flash){ html += "<div class='notice'>"+esc(view.flash)+"</div>"; view.flash=""; }
   html += "<div class='row'>";
   if(c.neu>0) html += "<button class='btn primary' onclick=\"startStudy('sort')\">Сортувати нові ("+c.neu+")</button>";
-  if(c.dont+c.unsure>0) html += "<button class='btn yellow' onclick=\"startStudy('learn')\">Вчити ("+(c.dont+c.unsure)+")</button>";
+  if(c.dont+c.unsure>0) html += "<button class='btn yellow' onclick=\"startStudy('learn')\">"+(isDeck?"Вчити все":"Вчити")+" ("+(c.dont+c.unsure)+")</button>";
   if(c.know===c.total && c.total>0) html += "<button class='btn green' onclick='startTest()'>Фінальний тест</button>";
   else if(c.know>0) html += "<button class='btn' onclick='startTest()'>Тест</button>";
   html += "</div>";
@@ -837,20 +888,29 @@ function rSong(){
     html += isDeck
       ? "<div class='card center'>🏆 <b>Блок вивчено!</b><div class='sub'>Можна долити наступну порцію слів або перейти на рівень вище.</div></div>"
       : "<div class='card center'>🎧 <b>Все вивчено!</b><div class='sub'>Час увімкнути пісню і зрозуміти кожне слово.</div></div>";
-  html += "<div class='tabs'>"+
-    "<div class='tab "+(view.tab==="word"?"active":"")+"' onclick=\"go('song',{tab:'word'})\">Слова ("+s.items.filter(i=>i.kind==="word").length+")</div>"+
-    "<div class='tab "+(view.tab==="phrase"?"active":"")+"' onclick=\"go('song',{tab:'phrase'})\">Фрази ("+s.items.filter(i=>i.kind==="phrase").length+")</div></div>";
-  html += "<div class='card'>";
-  if(!sorted.length) html += "<p class='sub center'>Тут порожньо.</p>";
-  else html += "<p class='sub' style='margin-top:0'>Тапни по слову, щоб почути вимову 🔊</p>";
-  for(const it of sorted){
-    const d = it.status==="know"?"g":it.status==="unsure"?"y":it.status==="dont"?"r":"n";
-    html += "<div class='list-item'><span class='dot "+d+"'></span>"+
-      "<div class='li-main' style='cursor:pointer' onclick=\"speakItem('"+it.id+"')\"><div class='li-w'>"+esc(it.text)+"</div>"+
-      "<div class='li-t'>"+esc(it.t)+"</div></div>"+
-      "<button class='del-x' onclick=\"delItem('"+it.id+"',this)\">✕</button></div>";
+  if(isDeck){
+    /* блок словника: групи за частинами мови + фрази */
+    if(!s.items.length) html += "<div class='card'><p class='sub center'>Тут порожньо.</p></div>";
+    else html += "<p class='sub' style='margin:12px 0 2px'>Тапни по слову, щоб почути вимову 🔊</p>";
+    const groups = POS_ORDER.map(p=>({key:p, label:POS_LABELS[p],
+      items: s.items.filter(i=>i.kind==="word" && (i.pos||"other")===p)}));
+    groups.push({key:"phrase", label:"Фрази", items: s.items.filter(i=>i.kind==="phrase")});
+    for(const g of groups){
+      if(!g.items.length) continue;
+      html += grpCard(g);
+    }
+  } else {
+    /* пісня: як і раніше — вкладки Слова / Фрази */
+    const sorted = sortByStatus(s.items.filter(it=>it.kind===view.tab));
+    html += "<div class='tabs'>"+
+      "<div class='tab "+(view.tab==="word"?"active":"")+"' onclick=\"go('song',{tab:'word'})\">Слова ("+s.items.filter(i=>i.kind==="word").length+")</div>"+
+      "<div class='tab "+(view.tab==="phrase"?"active":"")+"' onclick=\"go('song',{tab:'phrase'})\">Фрази ("+s.items.filter(i=>i.kind==="phrase").length+")</div></div>";
+    html += "<div class='card'>";
+    if(!sorted.length) html += "<p class='sub center'>Тут порожньо.</p>";
+    else html += "<p class='sub' style='margin-top:0'>Тапни по слову, щоб почути вимову 🔊</p>";
+    for(const it of sorted) html += itemRow(it);
+    html += "</div>";
   }
-  html += "</div>";
   html += "<div class='row' style='margin-top:4px'>"+
     "<button class='btn small' style='background:transparent;border-color:var(--red);color:var(--red)' onclick='resetSong(this)'>Скинути прогрес</button>"+
     "<button class='btn small' style='background:transparent;border-color:var(--red);color:var(--red)' onclick='delSong(this)'>"+(isDeck?"Видалити блок":"Видалити пісню")+"</button></div>";
@@ -888,11 +948,14 @@ function resetSong(btn){
 }
 
 /* ---------- sort & learn (спільний екран картки) ---------- */
-function startStudy(mode){
+function startStudy(mode, pos){
   const s = songById(view.songId);
+  /* pos: undefined = весь блок; "noun"/"verb"/"adj"/"adv"/"other" = група слів; "phrase" = фрази */
+  const fit = i => !pos ? true : (pos==="phrase" ? i.kind==="phrase" : (i.kind==="word" && (i.pos||"other")===pos));
   let queue;
-  if(mode==="sort") queue = s.items.filter(i=>i.status==="new");
-  else queue = shuffle(s.items.filter(i=>i.status==="dont"||i.status==="unsure"));
+  if(mode==="sort") queue = s.items.filter(i=>i.status==="new" && fit(i));
+  else queue = shuffle(s.items.filter(i=>(i.status==="dont"||i.status==="unsure") && fit(i)));
+  if(!queue.length) return;
   session = {mode, queue, done:0, total:queue.length, flipped:false, global:false};
   go("study");
 }
@@ -957,7 +1020,7 @@ function rStudy(){
     "<button class='btn small ghost' onclick=\"endStudy()\">На сьогодні досить</button></div>";
   if(session.mode==="sort"){
     app.innerHTML = "<div class='card study'>"+head+
-      "<div>"+kindTag(it)+"<div class='word'>"+esc(it.text)+" "+spk+"</div>"+trLine+
+      "<div>"+kindTag(it)+posTag(it)+"<div class='word'>"+wordDisp(it)+" "+spk+"</div>"+trLine+
       "<div class='trans'>"+esc(it.t)+"</div>"+highlightCtx(it)+"</div>"+
       "<div class='row'>"+
       "<button class='btn green' onclick=\"answerSort('know')\">Знаю</button>"+
@@ -968,12 +1031,12 @@ function rStudy(){
     const rev = it.status==="unsure";
     let body;
     if(rev){
-      body = "<div>"+kindTag(it)+"<span class='tag'>згадай слово</span>"+
+      body = "<div>"+kindTag(it)+posTag(it)+"<span class='tag'>згадай слово</span>"+
         "<div class='word'>"+esc(it.t)+"</div>";
-      if(session.flipped) body += "<div class='trans'>"+esc(it.text)+" "+spk+"</div>"+trLine+highlightCtx(it);
+      if(session.flipped) body += "<div class='trans'>"+wordDisp(it)+" "+spk+"</div>"+trLine+highlightCtx(it);
       body += "</div>";
     } else {
-      body = "<div>"+kindTag(it)+"<div class='word'>"+esc(it.text)+" "+spk+"</div>"+trLine;
+      body = "<div>"+kindTag(it)+posTag(it)+"<div class='word'>"+wordDisp(it)+" "+spk+"</div>"+trLine;
       if(session.flipped) body += "<div class='trans'>"+esc(it.t)+"</div>"+highlightCtx(it);
       else body += highlightCtx(it);
       body += "</div>";
@@ -1045,7 +1108,7 @@ function rTest(){
     "<span>Тест · "+(session.idx+1)+" з "+session.qs.length+
     (answered>0?" · <span style='color:var(--green)'>✓"+session.score+"</span>"+(wrongSoFar>0?" <span style='color:var(--red)'>✗"+wrongSoFar+"</span>":""):"")+"</span>"+
     "<button class='btn small ghost' onclick='exitTest()'>На сьогодні досить</button></div>"+
-    kindTag(q.it)+"<div class='word'>"+esc(q.it.text)+" <button class='spk' onclick='speakTest()'>🔊</button></div>"+
+    kindTag(q.it)+posTag(q.it)+"<div class='word'>"+wordDisp(q.it)+" <button class='spk' onclick='speakTest()'>🔊</button></div>"+
     (q.it.tr?"<div style='color:var(--muted);font-size:15px;margin-bottom:4px'>["+esc(q.it.tr)+"]</div>":"")+
     highlightCtx(q.it)+"<div style='margin-top:14px'>";
   q.options.forEach((opt,i)=>{
