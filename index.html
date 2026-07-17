@@ -79,6 +79,8 @@
   .tab{flex:1; text-align:center; padding:9px; border-radius:10px; background:var(--surface);
     border:1px solid var(--line); font-weight:700; font-size:14px; cursor:pointer; color:var(--muted);}
   .tab.active{background:var(--surface2); color:var(--text); border-color:var(--accent);}
+  .tabs.wrap{flex-wrap:wrap;}
+  .tabs.wrap .tab{flex:1 1 30%; padding:8px 6px; font-size:13px;}
   .opt{display:block; width:100%; text-align:left; margin-bottom:8px;}
   .opt.correct{background:var(--green); border-color:var(--green); color:#06281A;}
   .opt.wrong{background:var(--red); border-color:var(--red); color:#2B0E07;}
@@ -683,7 +685,7 @@ function rLibrary(){
       }
     }
   }
-  html += "</div><div class='footer-note'>Пісні і словник — окремі блоки, але слово, вивчене в одному, зараховується і в іншому. · v1.4</div>";
+  html += "</div><div class='footer-note'>Пісні і словник — окремі блоки, але слово, вивчене в одному, зараховується і в іншому. · v1.5</div>";
   app.innerHTML = html;
 }
 function colCard(s, title, sub){
@@ -889,15 +891,21 @@ function rSong(){
       ? "<div class='card center'>🏆 <b>Блок вивчено!</b><div class='sub'>Можна долити наступну порцію слів або перейти на рівень вище.</div></div>"
       : "<div class='card center'>🎧 <b>Все вивчено!</b><div class='sub'>Час увімкнути пісню і зрозуміти кожне слово.</div></div>";
   if(isDeck){
-    /* блок словника: групи за частинами мови + фрази */
+    /* блок словника: вкладки за частинами мови + фрази (показуємо лише непорожні) */
     if(!s.items.length) html += "<div class='card'><p class='sub center'>Тут порожньо.</p></div>";
-    else html += "<p class='sub' style='margin:12px 0 2px'>Тапни по слову, щоб почути вимову 🔊</p>";
-    const groups = POS_ORDER.map(p=>({key:p, label:POS_LABELS[p],
-      items: s.items.filter(i=>i.kind==="word" && (i.pos||"other")===p)}));
-    groups.push({key:"phrase", label:"Фрази", items: s.items.filter(i=>i.kind==="phrase")});
-    for(const g of groups){
-      if(!g.items.length) continue;
-      html += grpCard(g);
+    else {
+      const groups = POS_ORDER.map(p=>({key:p, label:POS_LABELS[p],
+        items: s.items.filter(i=>i.kind==="word" && (i.pos||"other")===p)}));
+      groups.push({key:"phrase", label:"Фрази", items: s.items.filter(i=>i.kind==="phrase")});
+      const avail = groups.filter(g=>g.items.length);
+      const act = avail.find(g=>g.key===view.posTab) || avail[0];
+      view.posTab = act.key;
+      html += "<div class='tabs wrap'>";
+      for(const g of avail)
+        html += "<div class='tab "+(g.key===act.key?"active":"")+"' onclick=\"go('song',{posTab:'"+g.key+"'})\">"+g.label+" ("+g.items.length+")</div>";
+      html += "</div>";
+      html += "<p class='sub' style='margin:0 0 4px'>Тапни по слову, щоб почути вимову 🔊</p>";
+      html += grpCard(act);
     }
   } else {
     /* пісня: як і раніше — вкладки Слова / Фрази */
