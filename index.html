@@ -4,6 +4,8 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
 <title>Пісенний тренажер</title>
+<link rel="icon" href="data:image/svg+xml,<svg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%20100%20100'><text%20y='0.9em'%20font-size='90'>🎧</text></svg>">
+<meta name="theme-color" content="#14161C">
 <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&display=swap" rel="stylesheet">
 <style>
   :root{
@@ -116,6 +118,28 @@ const LANG_CODES = {
 };
 const deckLangCode = lang => LANG_CODES[norm(lang)] || "en-US";
 
+/* прибирає повтори між блоками однієї мови: слово лишається лише в НАЙНИЖЧОМУ рівні */
+const LVL_ORDER = {A1:0,A2:1,B1:2,B2:3,C1:4,C2:5};
+function dedupeDecks(){
+  let removed = 0;
+  const langs = [...new Set(state.decks.map(d=>norm(d.lang)))];
+  for(const lg of langs){
+    const decks = state.decks.filter(d=>norm(d.lang)===lg)
+      .sort((a,b)=>(LVL_ORDER[a.level]??9)-(LVL_ORDER[b.level]??9));
+    const seen = new Set();
+    for(const d of decks){
+      const before = d.items.length;
+      d.items = d.items.filter(it=>{
+        const k = it.kind+"|"+norm(it.text);
+        if(seen.has(k)) return false;
+        seen.add(k);
+        return true;
+      });
+      removed += before - d.items.length;
+    }
+  }
+  return removed;
+}
 function normState(){
   if(!Array.isArray(state.songs)) state.songs = [];
   if(!Array.isArray(state.decks)) state.decks = [];
@@ -128,6 +152,8 @@ function normState(){
       if(it.kind==="word" && !it.pos) it.pos = "other";
     }
   }
+  /* якщо чистка щось прибрала — позначаємо стан новішим, щоб він запушився */
+  if(dedupeDecks() > 0) state.updated = Date.now();
 }
 const allCols = () => state.songs.concat(state.decks);
 /* пісні і словник — окремі навчальні блоки; scope вибирає один з них */
@@ -552,23 +578,33 @@ function importDeck(lang, level, jsonText){
   if(fresh) deck = {id:uid(), deck:true, lang, level, items:[], parts:0, added:Date.now()};
   const lc = deckLangCode(lang);
   const have = new Map(deck.items.map(i=>[i.kind+"|"+norm(i.text), i]));
-  let added=0, dup=0, upd=0, autoKnown=0;
+  /* картки з ІНШИХ блоків цієї ж мови — слова не дублюються між рівнями */
+  const other = new Map();
+  for(const d of state.decks){
+    if(d===deck || norm(d.lang)!==norm(lang)) continue;
+    for(const i of d.items){
+      const k = i.kind+"|"+norm(i.text);
+      if(!other.has(k)) other.set(k, i);
+    }
+  }
+  /* дублікат не додаємо, але доповнюємо наявну картку новими даними (категорія, артикль, транскрипція) */
+  const enrich = (x, w) => {
+    let ch = false;
+    const p = sanePos(w.pos);
+    if(w.pos && p!=="other" && (!x.pos || x.pos==="other")){ x.pos = p; ch = true; }
+    if(w.a && !x.a){ x.a = String(w.a); ch = true; }
+    if(w.tr && !x.tr){ x.tr = w.tr; ch = true; }
+    if(w.c && !x.c){ x.c = w.c; ch = true; }
+    return ch;
+  };
+  let added=0, dup=0, dupOther=0, upd=0, autoKnown=0;
   for(const w of (data.words||[])){
     if(!w.w || !w.t) continue;
     const k = "word|"+norm(w.w);
     const ex = have.get(k);
-    if(ex){
-      dup++;
-      /* дублікат — але доповнюємо наявну картку новими даними (категорія, артикль, транскрипція) */
-      let ch = false;
-      const p = sanePos(w.pos);
-      if(w.pos && p!=="other" && (!ex.pos || ex.pos==="other")){ ex.pos = p; ch = true; }
-      if(w.a && !ex.a){ ex.a = String(w.a); ch = true; }
-      if(w.tr && !ex.tr){ ex.tr = w.tr; ch = true; }
-      if(w.c && !ex.c){ ex.c = w.c; ch = true; }
-      if(ch) upd++;
-      continue;
-    }
+    if(ex){ dup++; if(enrich(ex, w)) upd++; continue; }
+    const ox = other.get(k);
+    if(ox){ dupOther++; if(enrich(ox, w)) upd++; continue; }
     const it = {id:uid(), kind:"word", text:w.w, t:w.t, c:w.c||"", tr:w.tr||"", status:"new", lc, pos:sanePos(w.pos)};
     if(w.a) it.a = String(w.a);
     if(state.known[norm(w.w)]){ it.status="know"; autoKnown++; }
@@ -578,16 +614,19 @@ function importDeck(lang, level, jsonText){
     if(!p.p || !p.t) continue;
     const k = "phrase|"+norm(p.p);
     if(have.has(k)){ dup++; continue; }
+    if(other.has(k)){ dupOther++; continue; }
     const it = {id:uid(), kind:"phrase", text:p.p, t:p.t, c:p.c||"", status:"new", lc};
     deck.items.push(it); have.set(k, it);
     added++;
   }
-  if(!added && !upd && fresh) return {err:"Список слів порожній."};
-  if(!added && !upd) return {err:"Усі "+dup+" карток уже є в цьому блоці. Скопіюй промпт ще раз — він попросить наступну порцію (№"+((deck.parts||0)+1)+")."};
+  if(fresh && !added)
+    return {err: dupOther ? "Усі слова цієї порції вже є в інших блоках мови «"+lang+"» — новий блок не створено." : "Список слів порожній."};
+  if(!added && !upd)
+    return {err:"Нових слів нема: "+dup+" вже в цьому блоці"+(dupOther? ", ще "+dupOther+" — в інших блоках цієї мови" : "")+". Скопіюй промпт ще раз — він попросить наступну порцію (№"+((deck.parts||0)+1)+")."};
   if(fresh) state.decks.push(deck);
   if(added) deck.parts = (deck.parts||0)+1;
   save();
-  return {deck, added, dup, upd, autoKnown};
+  return {deck, added, dup, dupOther, upd, autoKnown};
 }
 
 /* ---------- demo song (вигаданий текст, не реальна пісня) ---------- */
@@ -685,7 +724,7 @@ function rLibrary(){
       }
     }
   }
-  html += "</div><div class='footer-note'>Пісні і словник — окремі блоки, але слово, вивчене в одному, зараховується і в іншому. · v1.5</div>";
+  html += "</div><div class='footer-note'>Пісні і словник — окремі блоки, але слово, вивчене в одному, зараховується і в іншому. · v1.6</div>";
   app.innerHTML = html;
 }
 function colCard(s, title, sub){
@@ -830,8 +869,9 @@ function doDictImport(){
   if(r.err){ document.getElementById("dict-err").textContent = r.err; return; }
   syncPushNow();
   let msg = "Додано нових карток: "+r.added;
-  if(r.dup) msg += " · дублікатів: "+r.dup;
-  if(r.upd) msg += " (з них оновлено категорії/артиклі: "+r.upd+")";
+  if(r.dupOther) msg += " · вже були в інших блоках цієї мови: "+r.dupOther;
+  if(r.dup) msg += " · дублікатів у цьому блоці: "+r.dup;
+  if(r.upd) msg += " · оновлено даних наявних карток: "+r.upd;
   if(r.autoKnown) msg += " · уже вивчених (позначені «знаю»): "+r.autoKnown;
   go("song",{songId:r.deck.id, tab:"word", flash:msg, home:"dict"});
 }
@@ -857,12 +897,14 @@ function sortByStatus(items){
 function grpCard(g){
   const neu = g.items.filter(i=>i.status==="new").length;
   const learn = g.items.filter(i=>i.status==="dont"||i.status==="unsure").length;
+  const tested = g.items.filter(i=>i.status!=="new").length;
   let html = "<div class='card'>"+
     "<div style='display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:6px'>"+
-    "<b>"+g.label+" ("+g.items.length+")</b><div style='display:flex;gap:6px'>"+
+    "<b>"+g.label+" ("+g.items.length+")</b><div style='display:flex;gap:6px;flex-wrap:wrap'>"+
     (neu?"<button class='btn small primary' onclick=\"startStudy('sort','"+g.key+"')\">Сортувати "+neu+"</button>":"")+
     (learn?"<button class='btn small yellow' onclick=\"startStudy('learn','"+g.key+"')\">Вчити "+learn+"</button>":"")+
-    ((!neu && !learn)?"<span class='chip g'>вивчено ✓</span>":"")+
+    (tested?"<button class='btn small' onclick=\"startTest('"+g.key+"')\">Тест "+tested+"</button>":"")+
+    ((!neu && !learn && g.items.length)?"<span class='chip g'>вивчено ✓</span>":"")+
     "</div></div>";
   for(const it of sortByStatus(g.items)) html += itemRow(it);
   html += "</div>";
@@ -1081,9 +1123,12 @@ function answerLearn(remembered){
 }
 
 /* ---------- test ---------- */
-function startTest(){
+function startTest(pos){
   const s = songById(view.songId);
-  const pool = s.items.filter(i=>i.status!=="new");
+  /* pos: undefined = весь блок; група слів або "phrase" — тест лише по ній */
+  const fit = i => !pos ? true : (pos==="phrase" ? i.kind==="phrase" : (i.kind==="word" && (i.pos||"other")===pos));
+  const pool = s.items.filter(i=>i.status!=="new" && fit(i));
+  if(!pool.length) return;
   /* варіанти відповідей беремо зі свого блока: пісні — з пісень, словник — зі словника */
   let allT = (s.deck ? state.decks : state.songs).flatMap(x=>x.items.map(i=>i.t));
   if(new Set(allT).size < 8) allT = allCols().flatMap(x=>x.items.map(i=>i.t));
